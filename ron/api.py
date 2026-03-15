@@ -1,5 +1,5 @@
 from curl_cffi import requests
-from typing import Optional, Dict, Any, Generator, Literal
+from typing import Optional, Dict, Any, Tuple, Literal
 import json
 from .pow import DeepSeekPOW
 import sys
@@ -11,30 +11,25 @@ ThinkingMode = Literal['detailed', 'simple', 'disabled']
 SearchMode = Literal['enabled', 'disabled']
 
 class DeepSeekError(Exception):
-    """Base exception for all DeepSeek API errors"""
     pass
 
 class AuthenticationError(DeepSeekError):
-    """Raised when authentication fails"""
     pass
 
 class RateLimitError(DeepSeekError):
-    """Raised when API rate limit is exceeded"""
     pass
 
 class NetworkError(DeepSeekError):
-    """Raised when network communication fails"""
     pass
 
 class CloudflareError(DeepSeekError):
-    """Raised when Cloudflare blocks the request"""
     pass
 
 class APIError(DeepSeekError):
-    """Raised when API returns an error response"""
     def __init__(self, message: str, status_code: Optional[int] = None):
         super().__init__(message)
         self.status_code = status_code
+
 
 class DeepSeekAPI:
     BASE_URL = "https://chat.deepseek.com/api/v0"
@@ -46,7 +41,6 @@ class DeepSeekAPI:
         self.auth_token = auth_token
         self.pow_solver = DeepSeekPOW()
 
-        # Load cookies from JSON file
         cookies_path = Path(__file__).parent / 'cookies.json'
         try:
             with open(cookies_path, 'r') as f:
@@ -70,36 +64,24 @@ class DeepSeekAPI:
             'x-client-platform': 'web',
             'x-client-version': '1.0.0-always',
         }
-
         if pow_response:
             headers['x-ds-pow-response'] = pow_response
-
         return headers
 
     def _refresh_cookies(self) -> None:
-        """Run the cookie refresh script and reload cookies"""
         try:
-            # Get path to bypass.py
             script_path = Path(__file__).parent / 'bypass.py'
-
-            # Run the script
             subprocess.run([sys.executable, script_path], check=True)
-
-            # Wait briefly for cookies file to be written
             time.sleep(2)
-
-            # Reload cookies
             cookies_path = Path(__file__).parent / 'cookies.json'
             with open(cookies_path, 'r') as f:
                 cookie_data = json.load(f)
                 self.cookies = cookie_data.get('cookies', {})
-
         except Exception as e:
             print(f"\033[93mWarning: Failed to refresh cookies: {e}\033[0m", file=sys.stderr)
 
     def _make_request(self, method: str, endpoint: str, json_data: Dict[str, Any], pow_required: bool = False) -> Any:
         url = f"{self.BASE_URL}{endpoint}"
-
         retry_count = 0
         max_retries = 2
 
@@ -121,15 +103,13 @@ class DeepSeekAPI:
                     timeout=None
                 )
 
-                # Check if we hit Cloudflare protection
                 if "<!DOCTYPE html>" in response.text and "Just a moment" in response.text:
                     print("\033[93mWarning: Cloudflare protection detected. Bypassing...\033[0m", file=sys.stderr)
                     if retry_count < max_retries - 1:
-                        self._refresh_cookies()  # Refresh cookies
+                        self._refresh_cookies()
                         retry_count += 1
                         continue
 
-                # Handle other response codes
                 if response.status_code == 401:
                     raise AuthenticationError("Invalid or expired authentication token")
                 elif response.status_code == 429:
@@ -160,7 +140,7 @@ class DeepSeekAPI:
             raise APIError("Invalid challenge response format from server")
 
     def create_chat_session(self) -> str:
-        """Creates a new chat session and returns the session ID"""
+        """Creates a new chat session on DeepSeek's servers and returns the session ID."""
         try:
             response = self._make_request(
                 'POST',
@@ -170,58 +150,60 @@ class DeepSeekAPI:
             return response['data']['biz_data']['id']
         except KeyError:
             raise APIError("Invalid session creation response format from server")
-    
+
     def chat_completion(
         self,
         chat_session_id: str,
         prompt: str,
         parent_message_id: Optional[int] = None,
         thinking_enabled: bool = False,
-        search_enabled: bool = False
-    ) -> str:
-    
-        def consume_stream(response):
+        search_enabled: bool = False,
+    ) -> Tuple[str, Optional[int]]:
+        """
+        Send a message and return (response_text, message_id).
+        Pass the returned message_id as parent_message_id in the next call
+        to correctly thread the conversation.
+        """
+
+        def consume_stream(response) -> Tuple[str, bool, Optional[int]]:
             text = ""
             incomplete = False
             message_id = None
             data_lines = []
-    
+
             for raw in response.iter_lines():
                 if not raw:
                     if data_lines:
                         joined = "\n".join(data_lines).strip()
                         try:
                             parsed = json.loads(joined)
-    
-                            # ✅ TEXT
+
                             if isinstance(parsed.get("v"), str):
                                 text += parsed["v"]
-    
-                            # 🧠 MESSAGE ID
+
                             elif isinstance(parsed.get("v"), dict):
                                 resp = parsed["v"].get("response")
                                 if resp and "message_id" in resp:
                                     message_id = resp["message_id"]
-    
-                            # 🔴 INCOMPLETE STATUS
+
                             elif isinstance(parsed.get("v"), list):
                                 for item in parsed["v"]:
                                     if item.get("p") == "status" and item.get("v") == "INCOMPLETE":
                                         incomplete = True
-    
+
                         except Exception:
                             pass
-    
+
                         data_lines = []
                     continue
-    
+
                 decoded = raw.decode(errors="ignore").strip()
                 if decoded.startswith("data:"):
                     data_lines.append(decoded[5:].strip())
-    
+
             return text, incomplete, message_id
-    
-        # 🔥 FIRST REQUEST
+
+        # First request
         payload = {
             "chat_session_id": chat_session_id,
             "parent_message_id": parent_message_id,
@@ -230,11 +212,11 @@ class DeepSeekAPI:
             "thinking_enabled": thinking_enabled,
             "search_enabled": search_enabled,
         }
-    
+
         challenge = self._get_pow_challenge()
         pow_response = self.pow_solver.solve_challenge(challenge)
         headers = self._get_headers(pow_response)
-    
+
         response = requests.post(
             f"{self.BASE_URL}/chat/completion",
             headers=headers,
@@ -244,21 +226,21 @@ class DeepSeekAPI:
             stream=True,
             timeout=60
         )
-    
+
         full_text, incomplete, message_id = consume_stream(response)
-    
-        # 🔁 DIRECT AUTO-RESUME (APPEND MODE)
+
+        # Auto-resume if response was cut off
         while incomplete and message_id is not None:
             resume_payload = {
                 "chat_session_id": chat_session_id,
                 "message_id": message_id,
                 "ack_to_resume": True
             }
-    
+
             challenge = self._get_pow_challenge()
             pow_response = self.pow_solver.solve_challenge(challenge)
             headers = self._get_headers(pow_response)
-    
+
             response = requests.post(
                 f"{self.BASE_URL}/chat/continue",
                 headers=headers,
@@ -268,13 +250,12 @@ class DeepSeekAPI:
                 stream=True,
                 timeout=60
             )
-    
+
             resumed_text, incomplete, new_message_id = consume_stream(response)
-    
-            # 🔥 APPEND RESUMED TEXT
             full_text += resumed_text
-    
+
             if new_message_id is not None:
                 message_id = new_message_id
-    
-        return full_text
+
+        # Return both the text and the final message_id for threading
+        return full_text, message_id
