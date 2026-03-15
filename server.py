@@ -8,6 +8,11 @@ import sys
 import json
 import hashlib
 from threading import Lock
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
@@ -76,12 +81,19 @@ def get_session_for_messages(messages):
     h = history_hash(history)
     dbg(f"get_session: history_hash={h[:16]}... (history_len={len(history)})")
 
-    with cache_lock:
-        if h in session_cache:
-            cached = session_cache[h]
-            dbg(f"get_session: CACHE HIT → reusing session {cached['session_id']}, "
-                f"last_message_id={cached['last_message_id']}, turns={cached['turn_count']}")
-            return cached["session_id"], cached["deepseek_session_id"], cached["last_message_id"], final_user_message
+    # Only consult the cache when there is prior history.
+    # An empty history always means a brand-new session: every new conversation
+    # produces the same empty-history hash, so caching it would cause all new
+    # sessions to reuse the very first DeepSeek session ever created.
+    if history:
+        with cache_lock:
+            if h in session_cache:
+                cached = session_cache[h]
+                dbg(f"get_session: CACHE HIT → reusing session {cached['session_id']}, "
+                    f"last_message_id={cached['last_message_id']}, turns={cached['turn_count']}")
+                return cached["session_id"], cached["deepseek_session_id"], cached["last_message_id"], final_user_message
+    else:
+        dbg("get_session: empty history → forcing new DeepSeek session (no cache lookup)")
 
     # Cache miss — create new session and replay history
     dbg(f"get_session: CACHE MISS → creating new DeepSeek session and replaying {len(history)} turns")
@@ -292,14 +304,24 @@ def health_check():
 
 def main():
     parser = argparse.ArgumentParser(description='Run DeepSeek OpenAI-compatible server')
-    parser.add_argument('--api-key', type=str, required=True, help='DeepSeek auth token')
+    parser.add_argument('--api-key', type=str, help='DeepSeek auth token (can also be set via DEEPSEEK_TOKEN env var or .env file)')
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Host to bind to')
     parser.add_argument('--port', type=int, default=5000, help='Port to bind to')
     parser.add_argument('--debug', action='store_true', help='Run in debug mode')
     args = parser.parse_args()
 
+    # Get API key from command line args, environment variable, or .env file
+    api_key = args.api_key or os.getenv('DEEPSEEK_TOKEN')
+
+    if not api_key:
+        print("ERROR: No API key provided. Please provide via:")
+        print("  - --api-key command line argument")
+        print("  - DEEPSEEK_TOKEN environment variable")
+        print("  - DEEPSEEK_TOKEN in .env file")
+        sys.exit(1)
+
     global deepseek_api
-    deepseek_api = DeepSeekAPI(args.api_key)
+    deepseek_api = DeepSeekAPI(api_key)
 
     print(f"Starting DeepSeek OpenAI-compatible server on http://{args.host}:{args.port}")
     print("Endpoints:")

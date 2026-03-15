@@ -4,3 +4,7 @@ numpy
 nodriver
 drissionpage
 tqdm
+flask
+flask_cors
+dot-env
+ngpt
