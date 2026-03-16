@@ -63,15 +63,22 @@ class NativeToolPlugin(ToolPlugin):
 class SimulatedToolPlugin(ToolPlugin):
     """
     Simulates tool calling through prompt engineering.
-    Converts tool definitions to system prompts and extracts tool calls from responses.
+    Converts tool definitions to prompts and extracts tool calls from responses.
+
+    Args:
+        enabled: Whether the plugin is enabled
+        tool_placement: Where to place tool definitions - 'user' (default, working) or 'system'
     """
 
-    def __init__(self, enabled: bool = False):
+    def __init__(self, enabled: bool = False, tool_placement: str = 'user'):
         super().__init__(enabled)
         self.pending_tool_calls = {}  # Store tool calls between requests
+        self.tool_placement = tool_placement  # 'user' or 'system'
+
         plugin_dbg("=" * 50)
         plugin_dbg("SimulatedToolPlugin INITIALIZED")
         plugin_dbg(f"Enabled: {enabled}")
+        plugin_dbg(f"Tool placement: {tool_placement}")
         plugin_dbg("=" * 50)
 
     def _format_tools_prompt(self, tools: List[Dict]) -> str:
@@ -102,34 +109,35 @@ class SimulatedToolPlugin(ToolPlugin):
                         param_type = param_info.get("type", "string")
                         param_desc = param_info.get("description", "")
                         prompt += f"  - {param_name} ({param_type}, {req}): {param_desc}\n"
-                prompt += "\n"
+            prompt += "\n"
 
         prompt += """To use a tool, respond with a JSON object in the following format:
+{
+  "tool_calls": [
     {
-      "tool_calls": [
-        {
-          "name": "tool_name",
-          "arguments": {
-            "param1": "value1",
-            "param2": "value2"
-          }
-        }
-      ]
+      "name": "tool_name",
+      "arguments": {
+        "param1": "value1",
+        "param2": "value2"
+      }
     }
+  ]
+}
 
-    Do not add any other text before or after the JSON object when calling a tool.
-    """
+Do not add any other text before or after the JSON object when calling a tool.
+"""
 
         plugin_dbg(f"Generated prompt length: {len(prompt)} characters")
         plugin_dbg(f"Prompt preview: {prompt[:200]}...")
         return prompt
 
     def prepare_messages(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
-        """Add tool definitions to the LAST user message for better visibility."""
+        """Add tool definitions based on placement setting."""
         plugin_dbg("=" * 50)
         plugin_dbg("SimulatedToolPlugin.prepare_messages CALLED")
         plugin_dbg(f"Input messages: {len(messages)}")
         plugin_dbg(f"Tools provided: {tools is not None}")
+        plugin_dbg(f"Tool placement mode: {self.tool_placement}")
 
         if not tools:
             plugin_dbg("No tools provided, returning original messages")
@@ -141,35 +149,72 @@ class SimulatedToolPlugin(ToolPlugin):
         # Format tools prompt
         tools_prompt = self._format_tools_prompt(tools)
 
-        # Find the last user message and append the tools prompt
+        if self.tool_placement == 'user':
+            # Add to last user message (working approach)
+            return self._add_to_user_message(messages, tools_prompt)
+        else:
+            # Add to system message (original approach)
+            return self._add_to_system_message(messages, tools_prompt)
+
+    def _add_to_user_message(self, messages: List[Dict], tools_prompt: str) -> List[Dict]:
+        """Add tools prompt to the last user message."""
+        plugin_dbg("Using 'user' placement strategy")
+
         modified_messages = []
         last_user_index = -1
 
         for i, msg in enumerate(messages):
             if msg.get("role") == "user":
                 last_user_index = i
-            modified_messages.append(msg.copy())  # Make a copy to avoid modifying original
+            modified_messages.append(msg.copy())
 
         if last_user_index >= 0:
             plugin_dbg(f"Found last user message at index {last_user_index}")
             original_content = modified_messages[last_user_index].get("content", "")
             plugin_dbg(f"Original user content: {original_content[:100]}...")
 
-            # Append tools prompt to the last user message
             modified_messages[last_user_index]["content"] = (
                 original_content + "\n\n" + tools_prompt
             )
             plugin_dbg("Added tools prompt to last user message")
         else:
-            plugin_dbg("No user message found, adding tools as system message")
-            # If no user message, add as system message
+            plugin_dbg("No user message found, falling back to system message")
             modified_messages.insert(0, {
                 "role": "system",
                 "content": tools_prompt
             })
 
-        plugin_dbg(f"Final messages count: {len(modified_messages)}")
-        plugin_dbg("=" * 50)
+        return modified_messages
+
+    def _add_to_system_message(self, messages: List[Dict], tools_prompt: str) -> List[Dict]:
+        """Add tools prompt to system message."""
+        plugin_dbg("Using 'system' placement strategy")
+
+        modified_messages = []
+        system_message_found = False
+
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "system":
+                plugin_dbg(f"Found system message at index {i}")
+                original_content = msg.get("content", "")
+                plugin_dbg(f"Original system content: {original_content[:100]}...")
+
+                modified_messages.append({
+                    "role": "system",
+                    "content": original_content + "\n\n" + tools_prompt
+                })
+                system_message_found = True
+                plugin_dbg("Added tools to existing system message")
+            else:
+                modified_messages.append(msg)
+
+        if not system_message_found:
+            plugin_dbg("No system message found, creating new one with tools")
+            modified_messages.insert(0, {
+                "role": "system",
+                "content": tools_prompt
+            })
+
         return modified_messages
 
     def process_response(self, response_text: str, original_messages: List[Dict]) -> Tuple[str, Optional[List[Dict]]]:
@@ -303,9 +348,9 @@ class SimulatedToolPlugin(ToolPlugin):
 
 
 # Plugin factory
-def create_tool_plugin(plugin_type: str = "simulated", enabled: bool = False) -> ToolPlugin:
+def create_tool_plugin(plugin_type: str = "simulated", enabled: bool = False, tool_placement: str = 'user') -> ToolPlugin:
     """Factory function to create the appropriate tool plugin."""
-    plugin_dbg(f"create_tool_plugin called with type={plugin_type}, enabled={enabled}")
+    plugin_dbg(f"create_tool_plugin called with type={plugin_type}, enabled={enabled}, tool_placement={tool_placement}")
 
     if not enabled:
         plugin_dbg("Plugin disabled, returning base plugin")
@@ -315,8 +360,8 @@ def create_tool_plugin(plugin_type: str = "simulated", enabled: bool = False) ->
         plugin_dbg("Creating NativeToolPlugin")
         return NativeToolPlugin(enabled=True)
     elif plugin_type == "simulated":
-        plugin_dbg("Creating SimulatedToolPlugin")
-        return SimulatedToolPlugin(enabled=True)
+        plugin_dbg(f"Creating SimulatedToolPlugin with placement={tool_placement}")
+        return SimulatedToolPlugin(enabled=True, tool_placement=tool_placement)
     else:
         plugin_dbg(f"Unknown plugin type: {plugin_type}")
         raise ValueError(f"Unknown plugin type: {plugin_type}")

@@ -22,6 +22,7 @@ CORS(app)
 
 deepseek_api = None
 tool_plugin: ToolPlugin = None
+tool_placement: str = 'user'
 
 
 # Cache keyed by history_hash (hash of all turns EXCEPT the last user message).
@@ -33,11 +34,12 @@ cache_lock = Lock()
 def dbg(msg):
     print(f"[DEBUG] {msg}", file=sys.stderr, flush=True)
 
-def init_tool_plugin(plugin_type: str = "simulated", enabled: bool = False):
+def init_tool_plugin(plugin_type: str = "simulated", enabled: bool = False, placement: str = 'user'):
     """Initialize the tool plugin."""
-    global tool_plugin
-    tool_plugin = create_tool_plugin(plugin_type, enabled)
-    dbg(f"Tool plugin initialized: {plugin_type if enabled else 'disabled'}")
+    global tool_plugin, tool_placement
+    tool_placement = placement
+    tool_plugin = create_tool_plugin(plugin_type, enabled, placement)
+    dbg(f"Tool plugin initialized: {plugin_type if enabled else 'disabled'} with placement={placement}")
 
 def process_with_plugin(messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
     """Process messages through the plugin before sending to DeepSeek."""
@@ -587,6 +589,8 @@ def main():
     parser.add_argument('--enable-tools', action='store_true', help='Enable tool calling support')
     parser.add_argument('--tool-plugin', type=str, default='simulated', choices=['native', 'simulated'],
                        help='Tool plugin type (native or simulated)')
+    parser.add_argument('--tool-placement', type=str, default='user', choices=['user', 'system'],
+                       help='Where to place tool definitions (user=working, system=original)')
 
     args = parser.parse_args()
 
@@ -604,10 +608,12 @@ def main():
     deepseek_api = DeepSeekAPI(api_key)
 
     # Initialize tool plugin
-    init_tool_plugin(args.tool_plugin, args.enable_tools)
+    init_tool_plugin(args.tool_plugin, args.enable_tools, args.tool_placement)
 
     print(f"Starting DeepSeek OpenAI-compatible server on http://{args.host}:{args.port}")
     print(f"Tool plugin: {args.tool_plugin if args.enable_tools else 'disabled'}")
+    if args.enable_tools:
+        print(f"Tool placement: {args.tool_placement} (user=working with last user message, system=original approach)")
     print("Endpoints:")
     print(f"  GET  /v1/models")
     print(f"  POST /v1/chat/completions")
@@ -616,7 +622,6 @@ def main():
     print("\nPress Ctrl+C to stop")
 
     app.run(host=args.host, port=args.port, debug=args.debug)
-
 
 if __name__ == '__main__':
     main()
