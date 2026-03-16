@@ -64,7 +64,7 @@ def get_session_for_messages(messages):
     conversation = [
         {"role": msg["role"], "content": msg.get("content", "")}
         for msg in messages
-        if msg.get("role") in ("user", "assistant")
+        #if msg.get("role") in ("user", "assistant", "system")
     ]
 
     dbg(f"get_session: {len(conversation)} turns in messages[]")
@@ -210,8 +210,11 @@ def handle_normal_response(deepseek_session_id, user_message, parent_message_id,
         response, message_id = deepseek_api.chat_completion(
             deepseek_session_id, user_message, parent_message_id=parent_message_id
         )
+
+        # Show only beginning of response in debug
+        excerpt = response[:150] + "..." if len(response) > 150 else response
         dbg(f"handle_normal: response len={len(response)}, message_id={message_id}")
-        dbg(f"handle_normal: FULL RESPONSE:\n{response}\n--- END ---")
+        dbg(f"handle_normal: RESPONSE EXCERPT:\n{excerpt}\n--- END EXCERPT ---")
 
         update_cache_after_reply(history_before_final, user_message, response, message_id)
 
@@ -248,8 +251,11 @@ def handle_streaming_response(deepseek_session_id, user_message, parent_message_
             response, message_id = deepseek_api.chat_completion(
                 deepseek_session_id, user_message, parent_message_id=parent_message_id
             )
+
+            # Show only beginning of response in debug
+            excerpt = response[:150] + "..." if len(response) > 150 else response
             dbg(f"handle_streaming: response len={len(response)}, message_id={message_id}")
-            dbg(f"handle_streaming: FULL RESPONSE:\n{response}\n--- END ---")
+            dbg(f"handle_streaming: RESPONSE EXCERPT:\n{excerpt}\n--- END EXCERPT ---")
 
             update_cache_after_reply(history_before_final, user_message, response, message_id)
 
