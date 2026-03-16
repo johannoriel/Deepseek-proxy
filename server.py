@@ -1,3 +1,4 @@
+# In server.py - update the imports and global variables
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from ron.api import DeepSeekAPI
@@ -22,7 +23,7 @@ CORS(app)
 
 deepseek_api = None
 tool_plugin: ToolPlugin = None
-tool_placement: str = 'user'
+replace_system = False  # New global flag for system message replacement
 
 
 # Cache keyed by history_hash (hash of all turns EXCEPT the last user message).
@@ -34,12 +35,11 @@ cache_lock = Lock()
 def dbg(msg):
     print(f"[DEBUG] {msg}", file=sys.stderr, flush=True)
 
-def init_tool_plugin(plugin_type: str = "simulated", enabled: bool = False, placement: str = 'user'):
+def init_tool_plugin(plugin_type: str = "simulated", enabled: bool = False):
     """Initialize the tool plugin."""
-    global tool_plugin, tool_placement
-    tool_placement = placement
-    tool_plugin = create_tool_plugin(plugin_type, enabled, placement)
-    dbg(f"Tool plugin initialized: {plugin_type if enabled else 'disabled'} with placement={placement}")
+    global tool_plugin
+    tool_plugin = create_tool_plugin(plugin_type, enabled)
+    dbg(f"Tool plugin initialized: {plugin_type if enabled else 'disabled'}")
 
 def process_with_plugin(messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
     """Process messages through the plugin before sending to DeepSeek."""
@@ -85,6 +85,27 @@ def history_hash(conversation_without_last):
     key = json.dumps(conversation_without_last, ensure_ascii=False, sort_keys=False)
     return hashlib.sha256(key.encode()).hexdigest()
 
+def replace_system_messages(messages: List[Dict]) -> List[Dict]:
+    """
+    Replace all system messages with user messages.
+    This is done transparently for the caller.
+    """
+    if not replace_system:
+        return messages
+
+    modified_messages = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            # Convert system message to user message
+            modified_msg = msg.copy()
+            modified_msg["role"] = "user"
+            modified_messages.append(modified_msg)
+            dbg(f"Replaced system message with user message: {msg.get('content', '')[:50]}...")
+        else:
+            modified_messages.append(msg)
+
+    return modified_messages
+
 
 @app.route('/v1/models', methods=['GET'])
 def list_models():
@@ -122,27 +143,27 @@ def get_session_for_messages(messages):
 
     Returns (session_id, deepseek_session_id, last_message_id, final_user_message, tools)
     """
-    # First, process messages through plugin if needed
-    processed_messages = messages
+    # First, replace system messages with user messages if enabled
+    processed_messages = replace_system_messages(messages)
 
     # Handle tool responses if we're in a tool conversation
     if tool_plugin and tool_plugin.enabled:
         # Check if we have tool messages that need conversion
-        has_tool_msgs = any(msg.get("role") == "tool" for msg in messages)
+        has_tool_msgs = any(msg.get("role") == "tool" for msg in processed_messages)
         if has_tool_msgs and isinstance(tool_plugin, SimulatedToolPlugin):
             # Convert tool messages
             converted = []
-            for i, msg in enumerate(messages):
+            for i, msg in enumerate(processed_messages):
                 if msg.get("role") == "tool":
                     # Find the corresponding assistant message with tool_calls
                     for j in range(i-1, -1, -1):
-                        if messages[j].get("role") == "assistant" and messages[j].get("tool_calls"):
-                            tool_call = messages[j]["tool_calls"][0]  # Assume first tool call for now
+                        if processed_messages[j].get("role") == "assistant" and processed_messages[j].get("tool_calls"):
+                            tool_call = processed_messages[j]["tool_calls"][0]  # Assume first tool call for now
                             converted_msg = tool_plugin.prepare_tool_response(
                                 tool_call["id"],
                                 tool_call["function"]["name"],
                                 msg.get("content", ""),
-                                messages
+                                processed_messages
                             )
                             converted.append(converted_msg)
                             break
@@ -150,11 +171,18 @@ def get_session_for_messages(messages):
                     converted.append(msg)
             processed_messages = converted
 
-    conversation = [
-        {"role": msg["role"], "content": msg.get("content", "")}
-        for msg in processed_messages
-        if msg.get("role") in ("user", "assistant", "system", "tool")
-    ]
+    conversation = []
+    original_roles = []  # Track original roles for replay logic
+
+    for msg in processed_messages:
+        role = msg.get("role")
+        if role in ("user", "assistant", "system", "tool"):
+            conversation.append({
+                "role": role,
+                "content": msg.get("content", ""),
+                "original_role": role  # Store original role for debugging
+            })
+            original_roles.append(role)
 
     # Extract tools if present
     tools = None
@@ -170,22 +198,46 @@ def get_session_for_messages(messages):
 
     dbg(f"get_session: {len(conversation)} turns in messages[]")
     for i, m in enumerate(conversation):
-        dbg(f"  [{i}] {m['role']}: {repr(m['content'][:80] if m.get('content') else '')}")
+        dbg(f"  [{i}] {m['role']} (original: {m.get('original_role', m['role'])}): {repr(m['content'][:80] if m.get('content') else '')}")
 
-    # Handle tool message responses - the last message could be from tool
-    # We need to find the last user message and include everything before it in history
+    # Find the last ACTUAL user message (not converted system messages)
     last_user_index = None
     for i in range(len(conversation) - 1, -1, -1):
-        if conversation[i]["role"] == "user":
+        # Only consider messages that were originally user messages
+        if conversation[i]["role"] == "user" and conversation[i].get("original_role") == "user":
             last_user_index = i
             break
+
+    # If we didn't find an original user message, try to find any user message
+    if last_user_index is None:
+        for i in range(len(conversation) - 1, -1, -1):
+            if conversation[i]["role"] == "user":
+                last_user_index = i
+                break
 
     if last_user_index is None:
         dbg("get_session: ERROR - no user message found")
         return None, None, None, None, None
 
     final_user_message = conversation[last_user_index]["content"]
-    history = conversation[:last_user_index]  # everything before the last user message
+
+    # Include everything before the last user message in history, but only include
+    # assistant messages and original system messages (converted system messages
+    # that are now user messages should NOT be replayed as user messages)
+    history = []
+    for i in range(last_user_index):
+        msg = conversation[i]
+        original_role = msg.get("original_role", msg["role"])
+
+        # Only include:
+        # - Assistant messages (always)
+        # - Original system messages (even if they were converted, they were part of the context)
+        # - Original user messages (but only if they're not the last one)
+        if msg["role"] == "assistant" or original_role == "system" or (original_role == "user" and i < last_user_index):
+            history.append({
+                "role": msg["role"],  # Keep the current role for replay
+                "content": msg["content"]
+            })
 
     h = history_hash(history)
     dbg(f"get_session: history_hash={h[:16]}... (history_len={len(history)})")
@@ -212,6 +264,8 @@ def get_session_for_messages(messages):
         role = history[i]["role"]
         content = history[i].get("content", "")
 
+        # Only replay ACTUAL user messages, not converted system messages
+        # Converted system messages should be part of the context but not replayed as messages
         if role == "user":
             dbg(f"get_session: replaying turn [{i}] user, parent_message_id={last_message_id}")
             try:
@@ -240,6 +294,7 @@ def get_session_for_messages(messages):
                 traceback.print_exc(file=sys.stderr)
                 return None, None, None, None, None
 
+            # Skip the next message if it's an assistant response (which we just generated)
             if i + 1 < len(history) and history[i + 1]["role"] == "assistant":
                 dbg(f"get_session: skipping assistant turn [{i+1}]")
                 i += 2
@@ -248,14 +303,25 @@ def get_session_for_messages(messages):
                 dbg(f"get_session: tool response follows, will handle in next iteration")
                 i += 1
                 continue
+            else:
+                i += 1
+        elif role == "assistant":
+            # We should never have to replay assistant messages - they should be generated
+            # as responses to user messages. If we encounter one without a preceding user,
+            # skip it.
+            dbg(f"get_session: skipping standalone assistant message at [{i}]")
+            i += 1
+            continue
         elif role == "tool":
             # Handle tool messages - they should be sent as part of the next user message
-            # For now, just skip them as they'll be handled by the next user message
             dbg(f"get_session: skipping tool message at [{i}]")
             i += 1
             continue
         else:
+            # System messages or other roles - skip replay
+            dbg(f"get_session: skipping non-user message at [{i}] with role={role}")
             i += 1
+            continue
 
     # Create a new session ID for our cache
     session_id = str(uuid.uuid4())
@@ -317,7 +383,7 @@ def chat_completions():
         tools = data.get('tools', None)
         tool_choice = data.get('tool_choice', 'auto')
 
-        dbg(f"--- NEW REQUEST: {len(messages)} messages, stream={stream}, tools={tools is not None}, plugin_enabled={tool_plugin and tool_plugin.enabled} ---")
+        dbg(f"--- NEW REQUEST: {len(messages)} messages, stream={stream}, tools={tools is not None}, plugin_enabled={tool_plugin and tool_plugin.enabled}, replace_system={replace_system} ---")
 
         if not messages:
             return jsonify({"error": "No messages provided"}), 400
@@ -589,8 +655,10 @@ def main():
     parser.add_argument('--enable-tools', action='store_true', help='Enable tool calling support')
     parser.add_argument('--tool-plugin', type=str, default='simulated', choices=['native', 'simulated'],
                        help='Tool plugin type (native or simulated)')
-    parser.add_argument('--tool-placement', type=str, default='user', choices=['user', 'system'],
-                       help='Where to place tool definitions (user=working, system=original)')
+
+    # New system message replacement option
+    parser.add_argument('--replace-system', action='store_true',
+                       help='Replace all system messages with user messages (transparent to caller)')
 
     args = parser.parse_args()
 
@@ -604,16 +672,16 @@ def main():
         print("  - DEEPSEEK_TOKEN in .env file")
         sys.exit(1)
 
-    global deepseek_api
+    global deepseek_api, replace_system
     deepseek_api = DeepSeekAPI(api_key)
+    replace_system = args.replace_system  # Set the global flag
 
     # Initialize tool plugin
-    init_tool_plugin(args.tool_plugin, args.enable_tools, args.tool_placement)
+    init_tool_plugin(args.tool_plugin, args.enable_tools)
 
     print(f"Starting DeepSeek OpenAI-compatible server on http://{args.host}:{args.port}")
     print(f"Tool plugin: {args.tool_plugin if args.enable_tools else 'disabled'}")
-    if args.enable_tools:
-        print(f"Tool placement: {args.tool_placement} (user=working with last user message, system=original approach)")
+    print(f"System message replacement: {'enabled' if args.replace_system else 'disabled'}")
     print("Endpoints:")
     print(f"  GET  /v1/models")
     print(f"  POST /v1/chat/completions")
