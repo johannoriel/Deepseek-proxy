@@ -1,5 +1,5 @@
 from curl_cffi import requests
-from typing import Optional, Dict, Any, Tuple, Literal
+from typing import Optional, Dict, Any, Tuple, Literal, List, Union
 import json
 from .pow import DeepSeekPOW
 import sys
@@ -151,6 +151,37 @@ class DeepSeekAPI:
         except KeyError:
             raise APIError("Invalid session creation response format from server")
 
+    def _parse_tool_calls_from_stream(self, data_lines: List[str]) -> Tuple[Optional[List[Dict]], str]:
+        """Parse tool calls from streaming response data."""
+        tool_calls = []
+        text_parts = []
+
+        for line in data_lines:
+            try:
+                parsed = json.loads(line)
+                if isinstance(parsed.get("v"), dict):
+                    # Check for tool calls in the response
+                    if "tool_calls" in parsed["v"]:
+                        for tc in parsed["v"]["tool_calls"]:
+                            tool_calls.append({
+                                "id": tc.get("id", f"call_{len(tool_calls)}_{int(time.time())}"),
+                                "type": "function",
+                                "function": {
+                                    "name": tc.get("function", {}).get("name", ""),
+                                    "arguments": tc.get("function", {}).get("arguments", "{}")
+                                }
+                            })
+                    # Get text content
+                    if "content" in parsed["v"]:
+                        text_parts.append(parsed["v"]["content"])
+                elif isinstance(parsed.get("v"), str):
+                    text_parts.append(parsed["v"])
+            except Exception:
+                # If parsing fails, treat as text
+                text_parts.append(line)
+
+        return tool_calls if tool_calls else None, "".join(text_parts)
+
     def chat_completion(
         self,
         chat_session_id: str,
@@ -158,17 +189,20 @@ class DeepSeekAPI:
         parent_message_id: Optional[int] = None,
         thinking_enabled: bool = False,
         search_enabled: bool = False,
-    ) -> Tuple[str, Optional[int]]:
+        tools: Optional[List[Dict]] = None,
+        tool_choice: Union[str, Dict] = 'auto',
+    ) -> Union[Tuple[str, Optional[int]], Dict[str, Any]]:
         """
-        Send a message and return (response_text, message_id).
-        Pass the returned message_id as parent_message_id in the next call
-        to correctly thread the conversation.
+        Send a message and return response.
+        If tools are provided and the model decides to use them, returns a dict with tool_calls.
+        Otherwise returns (response_text, message_id).
         """
 
-        def consume_stream(response) -> Tuple[str, bool, Optional[int]]:
+        def consume_stream(response) -> Tuple[str, bool, Optional[int], Optional[List[Dict]]]:
             text = ""
             incomplete = False
             message_id = None
+            tool_calls = None
             data_lines = []
 
             for raw in response.iter_lines():
@@ -186,13 +220,28 @@ class DeepSeekAPI:
                                 if resp and "message_id" in resp:
                                     message_id = resp["message_id"]
 
+                                # Check for tool calls
+                                if "tool_calls" in parsed["v"]:
+                                    tc_data = parsed["v"]["tool_calls"]
+                                    if tc_data and not tool_calls:
+                                        tool_calls = []
+                                        for i, tc in enumerate(tc_data):
+                                            tool_calls.append({
+                                                "id": tc.get("id", f"call_{i}_{int(time.time())}"),
+                                                "type": "function",
+                                                "function": {
+                                                    "name": tc.get("function", {}).get("name", ""),
+                                                    "arguments": json.dumps(tc.get("function", {}).get("arguments", {}))
+                                                }
+                                            })
+
                             elif isinstance(parsed.get("v"), list):
                                 for item in parsed["v"]:
                                     if item.get("p") == "status" and item.get("v") == "INCOMPLETE":
                                         incomplete = True
 
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            dbg(f"Error parsing stream data: {e}")
 
                         data_lines = []
                     continue
@@ -201,9 +250,9 @@ class DeepSeekAPI:
                 if decoded.startswith("data:"):
                     data_lines.append(decoded[5:].strip())
 
-            return text, incomplete, message_id
+            return text, incomplete, message_id, tool_calls
 
-        # First request
+        # Build the payload with all supported parameters
         payload = {
             "chat_session_id": chat_session_id,
             "parent_message_id": parent_message_id,
@@ -212,6 +261,13 @@ class DeepSeekAPI:
             "thinking_enabled": thinking_enabled,
             "search_enabled": search_enabled,
         }
+
+        # Add tools to payload if provided (native DeepSeek API support)
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+
+        dbg(f"chat_completion: Sending payload with tools={tools is not None}")
 
         challenge = self._get_pow_challenge()
         pow_response = self.pow_solver.solve_challenge(challenge)
@@ -227,7 +283,7 @@ class DeepSeekAPI:
             timeout=60
         )
 
-        full_text, incomplete, message_id = consume_stream(response)
+        full_text, incomplete, message_id, tool_calls = consume_stream(response)
 
         # Auto-resume if response was cut off
         while incomplete and message_id is not None:
@@ -251,11 +307,29 @@ class DeepSeekAPI:
                 timeout=60
             )
 
-            resumed_text, incomplete, new_message_id = consume_stream(response)
+            resumed_text, incomplete, new_message_id, new_tool_calls = consume_stream(response)
             full_text += resumed_text
+
+            # Merge tool calls if any
+            if new_tool_calls and not tool_calls:
+                tool_calls = new_tool_calls
 
             if new_message_id is not None:
                 message_id = new_message_id
 
-        # Return both the text and the final message_id for threading
-        return full_text, message_id
+        # If we have tool calls, return them in a structured format
+        if tool_calls:
+            dbg(f"chat_completion: Detected {len(tool_calls)} tool calls in response")
+            return {
+                'content': full_text,
+                'tool_calls': tool_calls,
+                'message_id': message_id
+            }
+        else:
+            # Regular text response
+            return full_text, message_id
+
+
+# Helper function for debug logging
+def dbg(msg):
+    print(f"[DEBUG] {msg}", file=sys.stderr, flush=True)
