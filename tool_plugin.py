@@ -1,0 +1,322 @@
+# tool_plugin.py (updated with debug messages)
+"""
+Plugin system for tool calling support in DeepSeek API.
+Can be enabled/disabled via configuration.
+"""
+
+import json
+import re
+from typing import Dict, Any, List, Optional, Tuple
+import time
+import sys
+
+
+def plugin_dbg(msg):
+    """Debug function for plugin-specific messages"""
+    print(f"[PLUGIN DEBUG] {msg}", file=sys.stderr, flush=True)
+
+
+class ToolPlugin:
+    """Base class for tool calling plugins."""
+
+    def __init__(self, enabled: bool = False):
+        self.enabled = enabled
+        plugin_dbg(f"ToolPlugin base initialized, enabled={enabled}")
+
+    def prepare_messages(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
+        """Modify messages before sending to DeepSeek API."""
+        plugin_dbg(f"Base prepare_messages called with {len(messages)} messages, tools={tools is not None}")
+        return messages
+
+    def process_response(self, response_text: str, original_messages: List[Dict]) -> Tuple[str, Optional[List[Dict]]]:
+        """Process the response text and extract tool calls if present."""
+        plugin_dbg(f"Base process_response called with response_text length={len(response_text)}")
+        return response_text, None
+
+    def prepare_tool_response(self, tool_call_id: str, tool_name: str, tool_response: str, original_messages: List[Dict]) -> Dict:
+        """Prepare a tool response message to send back to the API."""
+        plugin_dbg(f"Base prepare_tool_response called for tool {tool_name}")
+        return {
+            "role": "user",
+            "content": f"[Tool Response for {tool_name}]: {tool_response}"
+        }
+
+
+class NativeToolPlugin(ToolPlugin):
+    """Uses DeepSeek's native tool calling support."""
+
+    def __init__(self, enabled: bool = False):
+        super().__init__(enabled)
+        plugin_dbg("NativeToolPlugin initialized")
+
+    def prepare_messages(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
+        plugin_dbg(f"NativeToolPlugin.prepare_messages called, tools={tools is not None}")
+        # For native support, we don't modify messages
+        return messages
+
+    def process_response(self, response_text: str, original_messages: List[Dict]) -> Tuple[str, Optional[List[Dict]]]:
+        plugin_dbg("NativeToolPlugin.process_response called")
+        # Native tool calls are already in the right format
+        return response_text, None
+
+
+class SimulatedToolPlugin(ToolPlugin):
+    """
+    Simulates tool calling through prompt engineering.
+    Converts tool definitions to system prompts and extracts tool calls from responses.
+    """
+
+    def __init__(self, enabled: bool = False):
+        super().__init__(enabled)
+        self.pending_tool_calls = {}  # Store tool calls between requests
+        plugin_dbg("=" * 50)
+        plugin_dbg("SimulatedToolPlugin INITIALIZED")
+        plugin_dbg(f"Enabled: {enabled}")
+        plugin_dbg("=" * 50)
+
+    def _format_tools_prompt(self, tools: List[Dict]) -> str:
+        """Convert tool definitions into a clear instruction prompt."""
+        plugin_dbg(f"_format_tools_prompt called with {len(tools)} tools")
+
+        prompt = "\n\nYou have access to the following tools/functions:\n\n"
+
+        for tool in tools:
+            if tool.get("type") == "function":
+                func = tool.get("function", {})
+                name = func.get("name", "unknown")
+                description = func.get("description", "")
+                parameters = func.get("parameters", {})
+
+                plugin_dbg(f"  Formatting tool: {name}")
+
+                prompt += f"Tool: {name}\n"
+                prompt += f"Description: {description}\n"
+
+                if parameters:
+                    prompt += "Parameters:\n"
+                    props = parameters.get("properties", {})
+                    required = parameters.get("required", [])
+
+                    for param_name, param_info in props.items():
+                        req = "required" if param_name in required else "optional"
+                        param_type = param_info.get("type", "string")
+                        param_desc = param_info.get("description", "")
+                        prompt += f"  - {param_name} ({param_type}, {req}): {param_desc}\n"
+                prompt += "\n"
+
+        prompt += """To use a tool, respond with a JSON object in the following format:
+    {
+      "tool_calls": [
+        {
+          "name": "tool_name",
+          "arguments": {
+            "param1": "value1",
+            "param2": "value2"
+          }
+        }
+      ]
+    }
+
+    Do not add any other text before or after the JSON object when calling a tool.
+    """
+
+        plugin_dbg(f"Generated prompt length: {len(prompt)} characters")
+        plugin_dbg(f"Prompt preview: {prompt[:200]}...")
+        return prompt
+
+    def prepare_messages(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
+        """Add tool definitions to the LAST user message for better visibility."""
+        plugin_dbg("=" * 50)
+        plugin_dbg("SimulatedToolPlugin.prepare_messages CALLED")
+        plugin_dbg(f"Input messages: {len(messages)}")
+        plugin_dbg(f"Tools provided: {tools is not None}")
+
+        if not tools:
+            plugin_dbg("No tools provided, returning original messages")
+            return messages
+
+        plugin_dbg(f"Tools count: {len(tools)}")
+        plugin_dbg(f"Tools data: {json.dumps(tools, indent=2)}")
+
+        # Format tools prompt
+        tools_prompt = self._format_tools_prompt(tools)
+
+        # Find the last user message and append the tools prompt
+        modified_messages = []
+        last_user_index = -1
+
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                last_user_index = i
+            modified_messages.append(msg.copy())  # Make a copy to avoid modifying original
+
+        if last_user_index >= 0:
+            plugin_dbg(f"Found last user message at index {last_user_index}")
+            original_content = modified_messages[last_user_index].get("content", "")
+            plugin_dbg(f"Original user content: {original_content[:100]}...")
+
+            # Append tools prompt to the last user message
+            modified_messages[last_user_index]["content"] = (
+                original_content + "\n\n" + tools_prompt
+            )
+            plugin_dbg("Added tools prompt to last user message")
+        else:
+            plugin_dbg("No user message found, adding tools as system message")
+            # If no user message, add as system message
+            modified_messages.insert(0, {
+                "role": "system",
+                "content": tools_prompt
+            })
+
+        plugin_dbg(f"Final messages count: {len(modified_messages)}")
+        plugin_dbg("=" * 50)
+        return modified_messages
+
+    def process_response(self, response_text: str, original_messages: List[Dict]) -> Tuple[str, Optional[List[Dict]]]:
+        """Extract tool calls from response text."""
+        plugin_dbg("=" * 50)
+        plugin_dbg("SimulatedToolPlugin.process_response CALLED")
+        plugin_dbg(f"Response text length: {len(response_text)}")
+        plugin_dbg(f"Response preview: {response_text[:200]}")
+
+        tool_calls = []
+        cleaned_text = response_text
+
+        # Try multiple patterns
+        patterns = [
+            # Pattern 1: Your working format with tool_calls array
+            r'{\s*"tool_calls"\s*:\s*\[\s*{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*{[^}]*}\s*}\s*]\s*}',
+
+            # Pattern 2: Original format with function_call tags
+            r'<function_call>\s*({.*?})\s*</function_call>',
+
+            # Pattern 3: Just a JSON object with name and arguments
+            r'{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*{[^}]*}\s*}',
+        ]
+
+        for pattern_idx, pattern in enumerate(patterns):
+            plugin_dbg(f"Trying pattern {pattern_idx + 1}")
+            matches = re.findall(pattern, response_text, re.DOTALL)
+
+            if matches:
+                plugin_dbg(f"Found {len(matches)} matches with pattern {pattern_idx + 1}")
+
+                for i, match in enumerate(matches):
+                    plugin_dbg(f"Match {i}: {match[:100]}...")
+                    try:
+                        # Handle different match types
+                        if pattern_idx == 0:  # Full tool_calls format
+                            data = json.loads(match)
+                            for tc in data.get("tool_calls", []):
+                                tool_call = {
+                                    "id": f"call_{len(tool_calls)}_{int(time.time())}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.get("name", ""),
+                                        "arguments": json.dumps(tc.get("arguments", {}))
+                                    }
+                                }
+                                tool_calls.append(tool_call)
+                                cleaned_text = cleaned_text.replace(match, "")
+
+                        elif pattern_idx == 1:  # function_call tags
+                            data = json.loads(match)
+                            tool_call = {
+                                "id": f"call_{len(tool_calls)}_{int(time.time())}",
+                                "type": "function",
+                                "function": {
+                                    "name": data.get("name", ""),
+                                    "arguments": json.dumps(data.get("arguments", {}))
+                                }
+                            }
+                            tool_calls.append(tool_call)
+                            cleaned_text = cleaned_text.replace(f"<function_call>{match}</function_call>", "")
+
+                        elif pattern_idx == 2:  # Simple JSON
+                            data = json.loads(match)
+                            tool_call = {
+                                "id": f"call_{len(tool_calls)}_{int(time.time())}",
+                                "type": "function",
+                                "function": {
+                                    "name": data.get("name", ""),
+                                    "arguments": json.dumps(data.get("arguments", {}))
+                                }
+                            }
+                            tool_calls.append(tool_call)
+                            cleaned_text = cleaned_text.replace(match, "")
+
+                    except json.JSONDecodeError as e:
+                        plugin_dbg(f"Failed to parse JSON: {e}")
+                        continue
+
+                # If we found matches, break out of pattern loop
+                if tool_calls:
+                    break
+
+        plugin_dbg(f"Total tool calls extracted: {len(tool_calls)}")
+
+        if tool_calls:
+            timestamp = str(time.time())
+            self.pending_tool_calls[timestamp] = {
+                "tool_calls": tool_calls,
+                "timestamp": time.time()
+            }
+            plugin_dbg(f"Stored {len(tool_calls)} tool calls with key {timestamp}")
+
+        # Clean up whitespace
+        cleaned_text = re.sub(r'\n\s*\n', '\n\n', cleaned_text).strip()
+        plugin_dbg(f"Cleaned text length: {len(cleaned_text)}")
+        plugin_dbg(f"Returning {len(tool_calls)} tool calls")
+        plugin_dbg("=" * 50)
+
+        return cleaned_text, tool_calls if tool_calls else None
+
+
+    def prepare_tool_response(self, tool_call_id: str, tool_name: str, tool_response: str, original_messages: List[Dict]) -> Dict:
+        """Convert tool response to a user message that the model can understand."""
+        plugin_dbg("=" * 50)
+        plugin_dbg("SimulatedToolPlugin.prepare_tool_response CALLED")
+        plugin_dbg(f"Tool call ID: {tool_call_id}")
+        plugin_dbg(f"Tool name: {tool_name}")
+        plugin_dbg(f"Tool response length: {len(tool_response)}")
+        plugin_dbg(f"Tool response preview: {tool_response[:200]}")
+
+        result = {
+            "role": "user",
+            "content": f"The result of calling {tool_name} (ID: {tool_call_id}) is:\n\n{tool_response}\n\nPlease continue with your response based on this result."
+        }
+
+        plugin_dbg(f"Created response message: {result['content'][:100]}...")
+        plugin_dbg("=" * 50)
+        return result
+
+    def should_expect_tool_response(self, messages: List[Dict]) -> bool:
+        """Check if we're in the middle of a tool conversation."""
+        plugin_dbg("SimulatedToolPlugin.should_expect_tool_response CALLED")
+        # Look for assistant messages with tool calls in the recent history
+        for msg in reversed(messages[-10:]):  # Check last 10 messages
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                plugin_dbg(f"Found assistant message with tool calls, expecting response")
+                return True
+        plugin_dbg("No pending tool calls found")
+        return False
+
+
+# Plugin factory
+def create_tool_plugin(plugin_type: str = "simulated", enabled: bool = False) -> ToolPlugin:
+    """Factory function to create the appropriate tool plugin."""
+    plugin_dbg(f"create_tool_plugin called with type={plugin_type}, enabled={enabled}")
+
+    if not enabled:
+        plugin_dbg("Plugin disabled, returning base plugin")
+        return ToolPlugin(enabled=False)
+
+    if plugin_type == "native":
+        plugin_dbg("Creating NativeToolPlugin")
+        return NativeToolPlugin(enabled=True)
+    elif plugin_type == "simulated":
+        plugin_dbg("Creating SimulatedToolPlugin")
+        return SimulatedToolPlugin(enabled=True)
+    else:
+        plugin_dbg(f"Unknown plugin type: {plugin_type}")
+        raise ValueError(f"Unknown plugin type: {plugin_type}")

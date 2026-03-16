@@ -10,6 +10,9 @@ import hashlib
 from threading import Lock
 import os
 from dotenv import load_dotenv
+from typing import Dict, Any, List, Optional, Tuple
+from tool_plugin import create_tool_plugin, ToolPlugin, SimulatedToolPlugin, NativeToolPlugin
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -18,6 +21,8 @@ app = Flask(__name__)
 CORS(app)
 
 deepseek_api = None
+tool_plugin: ToolPlugin = None
+
 
 # Cache keyed by history_hash (hash of all turns EXCEPT the last user message).
 # Each entry: { "session_id": str, "last_message_id": int|None, "turn_count": int }
@@ -28,6 +33,50 @@ cache_lock = Lock()
 def dbg(msg):
     print(f"[DEBUG] {msg}", file=sys.stderr, flush=True)
 
+def init_tool_plugin(plugin_type: str = "simulated", enabled: bool = False):
+    """Initialize the tool plugin."""
+    global tool_plugin
+    tool_plugin = create_tool_plugin(plugin_type, enabled)
+    dbg(f"Tool plugin initialized: {plugin_type if enabled else 'disabled'}")
+
+def process_with_plugin(messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
+    """Process messages through the plugin before sending to DeepSeek."""
+    if not tool_plugin or not tool_plugin.enabled or not tools:
+        return messages
+    return tool_plugin.prepare_messages(messages, tools)
+
+def handle_tool_response_in_history(messages: List[Dict], tool_call_id: str, tool_name: str, tool_response: str) -> List[Dict]:
+    """Convert a tool response message to the format expected by the plugin."""
+    if not tool_plugin or not tool_plugin.enabled:
+        return messages
+
+    # Find the tool response message and convert it
+    converted_messages = []
+    for msg in messages:
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
+            # Convert tool message using plugin
+            converted = tool_plugin.prepare_tool_response(
+                tool_call_id,
+                tool_name,
+                msg.get("content", ""),
+                messages
+            )
+            converted_messages.append(converted)
+        else:
+            converted_messages.append(msg)
+
+    return converted_messages
+
+def extract_tool_calls_from_response(response_text: str, original_messages: List[Dict]) -> Tuple[str, Optional[List[Dict]]]:
+    """Extract tool calls from response text using the plugin."""
+    if not tool_plugin or not tool_plugin.enabled:
+        return response_text, None
+
+    # Check if this is a simulated plugin that needs to extract tool calls
+    if isinstance(tool_plugin, SimulatedToolPlugin):
+        return tool_plugin.process_response(response_text, original_messages)
+
+    return response_text, None
 
 def history_hash(conversation_without_last):
     """Stable hash of the conversation history (all turns before the final user message)."""
@@ -71,18 +120,51 @@ def get_session_for_messages(messages):
 
     Returns (session_id, deepseek_session_id, last_message_id, final_user_message, tools)
     """
+    # First, process messages through plugin if needed
+    processed_messages = messages
+
+    # Handle tool responses if we're in a tool conversation
+    if tool_plugin and tool_plugin.enabled:
+        # Check if we have tool messages that need conversion
+        has_tool_msgs = any(msg.get("role") == "tool" for msg in messages)
+        if has_tool_msgs and isinstance(tool_plugin, SimulatedToolPlugin):
+            # Convert tool messages
+            converted = []
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "tool":
+                    # Find the corresponding assistant message with tool_calls
+                    for j in range(i-1, -1, -1):
+                        if messages[j].get("role") == "assistant" and messages[j].get("tool_calls"):
+                            tool_call = messages[j]["tool_calls"][0]  # Assume first tool call for now
+                            converted_msg = tool_plugin.prepare_tool_response(
+                                tool_call["id"],
+                                tool_call["function"]["name"],
+                                msg.get("content", ""),
+                                messages
+                            )
+                            converted.append(converted_msg)
+                            break
+                else:
+                    converted.append(msg)
+            processed_messages = converted
+
     conversation = [
         {"role": msg["role"], "content": msg.get("content", "")}
-        for msg in messages
+        for msg in processed_messages
         if msg.get("role") in ("user", "assistant", "system", "tool")
     ]
 
     # Extract tools if present
     tools = None
-    for msg in messages:
+    for msg in messages:  # Use original messages to check for tools
         if msg.get("role") == "system" and "tools" in msg:
             tools = msg.get("tools")
             break
+    if not tools:
+        for msg in messages:
+            if "tools" in msg:
+                tools = msg.get("tools")
+                break
 
     dbg(f"get_session: {len(conversation)} turns in messages[]")
     for i, m in enumerate(conversation):
@@ -173,6 +255,7 @@ def get_session_for_messages(messages):
         else:
             i += 1
 
+    # Create a new session ID for our cache
     session_id = str(uuid.uuid4())
     entry = {
         "session_id": session_id,
@@ -229,31 +312,30 @@ def chat_completions():
         data = request.json
         messages = data.get('messages', [])
         stream = data.get('stream', False)
-        tools = data.get('tools', None)  # Get tools from request
+        tools = data.get('tools', None)
         tool_choice = data.get('tool_choice', 'auto')
 
-        dbg(f"--- NEW REQUEST: {len(messages)} messages, stream={stream}, tools={tools is not None} ---")
+        dbg(f"--- NEW REQUEST: {len(messages)} messages, stream={stream}, tools={tools is not None}, plugin_enabled={tool_plugin and tool_plugin.enabled} ---")
 
         if not messages:
             return jsonify({"error": "No messages provided"}), 400
 
-        # If tools are provided in the request, add them to the system message
-        if tools:
-            # Find or create system message with tools
-            system_msg_with_tools = None
-            for msg in messages:
-                if msg.get("role") == "system":
-                    system_msg_with_tools = msg
-                    break
+        # Store original messages for later reference
+        original_messages = messages.copy()
 
-            if system_msg_with_tools:
-                # Add tools to the system message
-                system_msg_with_tools["tools"] = tools
+        # Process messages through plugin if tools are present
+        if tools and tool_plugin and tool_plugin.enabled:
+            # For simulated plugin, we need to add tool definitions to system message
+            processed_messages = tool_plugin.prepare_messages(messages, tools)
+            dbg(f"Messages processed by plugin: {len(processed_messages)} messages")
+
+            # Update messages for the rest of the function
+            messages = processed_messages
 
         session_id, deepseek_session_id, last_message_id, user_message, extracted_tools = get_session_for_messages(messages)
 
-        # Use tools from request if available, otherwise use extracted ones
-        active_tools = tools or extracted_tools
+        # Use tools from request if available
+        active_tools = tools if (tools and tool_plugin and isinstance(tool_plugin, NativeToolPlugin)) else None
 
         if not deepseek_session_id or not user_message:
             return jsonify({"error": "Invalid message structure"}), 400
@@ -280,9 +362,9 @@ def chat_completions():
         dbg(f"chat_completions: sending final message, parent_message_id={last_message_id}, stream={stream}")
 
         if stream:
-            return handle_streaming_response(deepseek_session_id, user_message, last_message_id, history_before_final, active_tools, tool_choice)
+            return handle_streaming_response(deepseek_session_id, user_message, last_message_id, history_before_final, active_tools, tool_choice, original_messages)
         else:
-            return handle_normal_response(deepseek_session_id, user_message, last_message_id, history_before_final, active_tools, tool_choice)
+            return handle_normal_response(deepseek_session_id, user_message, last_message_id, history_before_final, active_tools, tool_choice, original_messages)
 
     except Exception as e:
         dbg(f"chat_completions: TOP-LEVEL EXCEPTION: {e}")
@@ -291,33 +373,42 @@ def chat_completions():
         return jsonify({"error": str(e)}), 500
 
 
-def handle_normal_response(deepseek_session_id, user_message, parent_message_id, history_before_final, tools=None, tool_choice='auto'):
+def handle_normal_response(deepseek_session_id, user_message, parent_message_id, history_before_final, tools=None, tool_choice='auto', original_messages=None):
     try:
-        # Pass tools to the DeepSeek API - now using native support
+        # Call DeepSeek API
         response_data = deepseek_api.chat_completion(
             deepseek_session_id,
             user_message,
             parent_message_id=parent_message_id,
-            tools=tools,
+            tools=tools,  # Only used if native plugin is enabled
             tool_choice=tool_choice
         )
 
         # Handle different response formats
         if isinstance(response_data, tuple):
             response_text, message_id = response_data
+
+            # Process response through plugin to extract tool calls
+            if tool_plugin and tool_plugin.enabled and original_messages:
+                processed_text, tool_calls = extract_tool_calls_from_response(response_text, original_messages)
+                response_text = processed_text
+            else:
+                tool_calls = None
+
             assistant_message = {"role": "assistant", "content": response_text}
+            if tool_calls:
+                assistant_message['tool_calls'] = tool_calls
+                dbg(f"handle_normal: Extracted {len(tool_calls)} tool calls via plugin")
         else:
-            # Response with tool calls from native API
+            # Native tool calls from API
             message_id = response_data.get('message_id')
             assistant_message = {
                 "role": "assistant",
                 "content": response_data.get('content', '')
             }
-
-            # Add tool calls if present - already in OpenAI format
             if 'tool_calls' in response_data:
                 assistant_message['tool_calls'] = response_data['tool_calls']
-                dbg(f"handle_normal: Native tool calls received: {json.dumps(response_data['tool_calls'], indent=2)}")
+                dbg(f"handle_normal: Native tool calls received: {len(response_data['tool_calls'])}")
 
         # Show only beginning of response in debug
         content = assistant_message.get('content', '')
@@ -357,26 +448,32 @@ def handle_normal_response(deepseek_session_id, user_message, parent_message_id,
         return jsonify({"error": f"DeepSeek API error: {str(e)}"}), 500
 
 
-def handle_streaming_response(deepseek_session_id, user_message, parent_message_id, history_before_final, tools=None, tool_choice='auto'):
+def handle_streaming_response(deepseek_session_id, user_message, parent_message_id, history_before_final, tools=None, tool_choice='auto', original_messages=None):
     from flask import Response, stream_with_context
 
     def generate():
         try:
-            # Call DeepSeek API with native tool support
+            # Call DeepSeek API
             response_data = deepseek_api.chat_completion(
                 deepseek_session_id,
                 user_message,
                 parent_message_id=parent_message_id,
-                tools=tools,
+                tools=tools,  # Only used if native plugin is enabled
                 tool_choice=tool_choice
             )
 
-            # For streaming, we need to handle the response differently
-            # The API might return the complete response even in stream mode
+            # Handle different response formats
             if isinstance(response_data, tuple):
                 response_text, message_id = response_data
-                has_tool_calls = False
-                tool_calls = None
+
+                # Process response through plugin to extract tool calls
+                if tool_plugin and tool_plugin.enabled and original_messages:
+                    processed_text, tool_calls = extract_tool_calls_from_response(response_text, original_messages)
+                    response_text = processed_text
+                else:
+                    tool_calls = None
+
+                has_tool_calls = tool_calls is not None
             else:
                 response_text = response_data.get('content', '')
                 message_id = response_data.get('message_id')
@@ -485,6 +582,12 @@ def main():
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Host to bind to')
     parser.add_argument('--port', type=int, default=5000, help='Port to bind to')
     parser.add_argument('--debug', action='store_true', help='Run in debug mode')
+
+    # Tool plugin arguments
+    parser.add_argument('--enable-tools', action='store_true', help='Enable tool calling support')
+    parser.add_argument('--tool-plugin', type=str, default='simulated', choices=['native', 'simulated'],
+                       help='Tool plugin type (native or simulated)')
+
     args = parser.parse_args()
 
     # Get API key from command line args, environment variable, or .env file
@@ -500,7 +603,11 @@ def main():
     global deepseek_api
     deepseek_api = DeepSeekAPI(api_key)
 
+    # Initialize tool plugin
+    init_tool_plugin(args.tool_plugin, args.enable_tools)
+
     print(f"Starting DeepSeek OpenAI-compatible server on http://{args.host}:{args.port}")
+    print(f"Tool plugin: {args.tool_plugin if args.enable_tools else 'disabled'}")
     print("Endpoints:")
     print(f"  GET  /v1/models")
     print(f"  POST /v1/chat/completions")
