@@ -177,11 +177,16 @@ def get_session_for_messages(messages):
     for msg in processed_messages:
         role = msg.get("role")
         if role in ("user", "assistant", "system", "tool"):
-            conversation.append({
+            # For assistant messages, preserve tool_calls if they exist
+            msg_copy = {
                 "role": role,
                 "content": msg.get("content", ""),
-                "original_role": role  # Store original role for debugging
-            })
+                "original_role": role
+            }
+            if role == "assistant" and "tool_calls" in msg:
+                msg_copy["tool_calls"] = msg["tool_calls"]
+
+            conversation.append(msg_copy)
             original_roles.append(role)
 
     # Extract tools if present
@@ -199,6 +204,8 @@ def get_session_for_messages(messages):
     dbg(f"get_session: {len(conversation)} turns in messages[]")
     for i, m in enumerate(conversation):
         dbg(f"  [{i}] {m['role']} (original: {m.get('original_role', m['role'])}): {repr(m['content'][:80] if m.get('content') else '')}")
+        if 'tool_calls' in m:
+            dbg(f"      has {len(m['tool_calls'])} tool calls")
 
     # Find the last ACTUAL user message (not converted system messages)
     last_user_index = None
@@ -221,23 +228,24 @@ def get_session_for_messages(messages):
 
     final_user_message = conversation[last_user_index]["content"]
 
-    # Include everything before the last user message in history, but only include
-    # assistant messages and original system messages (converted system messages
-    # that are now user messages should NOT be replayed as user messages)
+    # Include everything before the last user message in history
     history = []
     for i in range(last_user_index):
         msg = conversation[i]
         original_role = msg.get("original_role", msg["role"])
 
         # Only include:
-        # - Assistant messages (always)
+        # - Assistant messages (always, with their tool_calls if present)
         # - Original system messages (even if they were converted, they were part of the context)
         # - Original user messages (but only if they're not the last one)
         if msg["role"] == "assistant" or original_role == "system" or (original_role == "user" and i < last_user_index):
-            history.append({
-                "role": msg["role"],  # Keep the current role for replay
+            history_msg = {
+                "role": msg["role"],
                 "content": msg["content"]
-            })
+            }
+            if msg["role"] == "assistant" and "tool_calls" in msg:
+                history_msg["tool_calls"] = msg["tool_calls"]
+            history.append(history_msg)
 
     h = history_hash(history)
     dbg(f"get_session: history_hash={h[:16]}... (history_len={len(history)})")
@@ -264,8 +272,6 @@ def get_session_for_messages(messages):
         role = history[i]["role"]
         content = history[i].get("content", "")
 
-        # Only replay ACTUAL user messages, not converted system messages
-        # Converted system messages should be part of the context but not replayed as messages
         if role == "user":
             dbg(f"get_session: replaying turn [{i}] user, parent_message_id={last_message_id}")
             try:
@@ -283,9 +289,18 @@ def get_session_for_messages(messages):
 
                 if isinstance(response_data, tuple):
                     text, last_message_id = response_data
+                    # Check if the next message in history is an assistant message with tool_calls
+                    if i + 1 < len(history) and history[i + 1]["role"] == "assistant" and "tool_calls" in history[i + 1]:
+                        # We need to simulate the tool calls in the response
+                        # The assistant message with tool_calls will be handled separately
+                        pass
                 else:
                     text = response_data.get('content', '')
                     last_message_id = response_data.get('message_id')
+                    # If the response has tool_calls, store them for matching with history
+                    if "tool_calls" in response_data and i + 1 < len(history) and history[i + 1]["role"] == "assistant":
+                        # This response should match the next history item
+                        pass
 
                 dbg(f"get_session: replay [{i}] done, message_id={last_message_id}, reply_len={len(text)}")
             except Exception as e:
@@ -467,6 +482,7 @@ def handle_normal_response(deepseek_session_id, user_message, parent_message_id,
             if tool_calls:
                 assistant_message['tool_calls'] = tool_calls
                 dbg(f"handle_normal: Extracted {len(tool_calls)} tool calls via plugin")
+                dbg(f"handle_normal: Tool calls data: {json.dumps(tool_calls, indent=2)}")
         else:
             # Native tool calls from API
             message_id = response_data.get('message_id')
@@ -526,7 +542,7 @@ def handle_streaming_response(deepseek_session_id, user_message, parent_message_
                 deepseek_session_id,
                 user_message,
                 parent_message_id=parent_message_id,
-                tools=tools,  # Only used if native plugin is enabled
+                tools=tools,
                 tool_choice=tool_choice
             )
 
@@ -548,64 +564,117 @@ def handle_streaming_response(deepseek_session_id, user_message, parent_message_
                 tool_calls = response_data.get('tool_calls')
                 has_tool_calls = tool_calls is not None
 
-            # Show only beginning of response in debug
-            excerpt = response_text[:150] + "..." if len(response_text) > 150 else response_text
-            dbg(f"handle_streaming: response len={len(response_text)}, message_id={message_id}")
-            if has_tool_calls:
-                dbg(f"handle_streaming: contains {len(tool_calls)} tool calls")
-                dbg(f"handle_streaming: Tool calls: {json.dumps(tool_calls, indent=2)}")
-            dbg(f"handle_streaming: RESPONSE EXCERPT:\n{excerpt}\n--- END EXCERPT ---")
-
-            assistant_message = {
-                "role": "assistant",
-                "content": response_text
-            }
-            if has_tool_calls:
-                assistant_message['tool_calls'] = tool_calls
-
-            update_cache_after_reply(history_before_final, user_message, assistant_message, message_id)
-
             completion_id = f"chatcmpl-{uuid.uuid4().hex}"
             created = int(time.time())
             chunks_sent = 0
 
             if has_tool_calls:
-                # For tool calls in streaming mode, we need to send the tool calls in chunks
-                # according to the OpenAI streaming format
-
-                # First, send a chunk with just the role
-                yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'deepseek-chat', 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
+                # FIRST CHUNK: role only
+                role_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": "deepseek-chat",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant"},
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(role_chunk)}\n\n"
                 chunks_sent += 1
 
-                # Then send each tool call in separate chunks
-                for tool_call in tool_calls:
-                    # Send the tool call index and ID
-                    yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'deepseek-chat', 'choices': [{'index': 0, 'delta': {'tool_calls': [{'index': 0, 'id': tool_call['id'], 'type': 'function'}]}, 'finish_reason': None}]})}\n\n"
+                # Send each tool call
+                for tool_index, tool_call in enumerate(tool_calls):
+                    # CHUNK A: Initialize tool call with COMPLETE function object (empty arguments)
+                    init_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": "deepseek-chat",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": tool_index,
+                                    "id": tool_call['id'],
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_call['function']['name'],
+                                        "arguments": ""  # Empty string to start
+                                    }
+                                }]
+                            },
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(init_chunk)}\n\n"
                     chunks_sent += 1
 
-                    # Send the function name
-                    yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'deepseek-chat', 'choices': [{'index': 0, 'delta': {'tool_calls': [{'index': 0, 'function': {'name': tool_call['function']['name']}}]}, 'finish_reason': None}]})}\n\n"
-                    chunks_sent += 1
-
-                    # Send the arguments in chunks if they're long
+                    # Get arguments as string
                     arguments = tool_call['function']['arguments']
+                    if isinstance(arguments, dict):
+                        arguments = json.dumps(arguments)
+
+                    # CHUNKS B, C, D...: Send arguments incrementally
+                    # Each chunk MUST include the function object with the arguments field
                     chunk_size = 20
                     for i in range(0, len(arguments), chunk_size):
                         arg_chunk = arguments[i:i + chunk_size]
-                        yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'deepseek-chat', 'choices': [{'index': 0, 'delta': {'tool_calls': [{'index': 0, 'function': {'arguments': arg_chunk}}]}, 'finish_reason': None}]})}\n\n"
+                        arg_chunk_data = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": "deepseek-chat",
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [{
+                                        "index": tool_index,
+                                        "function": {
+                                            "arguments": arg_chunk
+                                        }
+                                    }]
+                                },
+                                "finish_reason": None
+                            }]
+                        }
+                        yield f"data: {json.dumps(arg_chunk_data)}\n\n"
                         chunks_sent += 1
-                        time.sleep(0.01)  # Small delay for realism
+                        time.sleep(0.01)
             else:
-                # Stream text content in chunks
+                # Regular text streaming
                 for i in range(0, len(response_text), 20):
                     chunk = response_text[i:i + 20]
-                    yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'deepseek-chat', 'choices': [{'index': 0, 'delta': {'content': chunk}, 'finish_reason': None}]})}\n\n"
+                    chunk_data = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": "deepseek-chat",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": chunk},
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(chunk_data)}\n\n"
                     chunks_sent += 1
                     time.sleep(0.05)
 
-            # Send finish chunk with appropriate finish_reason
+            # FINAL CHUNK: empty delta with finish_reason
             finish_reason = "tool_calls" if has_tool_calls else "stop"
-            yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'deepseek-chat', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': finish_reason}]})}\n\n"
+            final_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason
+                }]
+            }
+            yield f"data: {json.dumps(final_chunk)}\n\n"
             yield "data: [DONE]\n\n"
             dbg(f"handle_streaming: done, {chunks_sent} chunks sent")
 
@@ -613,7 +682,19 @@ def handle_streaming_response(deepseek_session_id, user_message, parent_message_
             dbg(f"handle_streaming: EXCEPTION: {e}")
             import traceback
             traceback.print_exc(file=sys.stderr)
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            error_chunk = {
+                "id": f"chatcmpl-{uuid.uuid4().hex}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
+            }
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
 
     return Response(
         stream_with_context(generate()),

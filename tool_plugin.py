@@ -196,6 +196,9 @@ Do not add any other text before or after the JSON object when calling a tool.
 
             # Pattern 3: Just a JSON object with name and arguments
             r'{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*{[^}]*}\s*}',
+
+            # Pattern 4: Tool call with function name and arguments (like your example)
+            r'{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*{[^}]*}(?:\s*,\s*"id"\s*:\s*"[^"]*")?\s*}',
         ]
 
         for pattern_idx, pattern in enumerate(patterns):
@@ -212,42 +215,46 @@ Do not add any other text before or after the JSON object when calling a tool.
                         if pattern_idx == 0:  # Full tool_calls format
                             data = json.loads(match)
                             for tc in data.get("tool_calls", []):
+                                # Ensure arguments is a string (OpenAI format expects string)
+                                arguments = tc.get("arguments", {})
+                                if isinstance(arguments, dict):
+                                    arguments = json.dumps(arguments)
+
                                 tool_call = {
-                                    "id": f"call_{len(tool_calls)}_{int(time.time())}",
+                                    "id": tc.get("id", f"call_{len(tool_calls)}_{int(time.time()*1000)}"),
                                     "type": "function",
                                     "function": {
                                         "name": tc.get("name", ""),
-                                        "arguments": json.dumps(tc.get("arguments", {}))
+                                        "arguments": arguments
                                     }
                                 }
                                 tool_calls.append(tool_call)
                                 cleaned_text = cleaned_text.replace(match, "")
 
-                        elif pattern_idx == 1:  # function_call tags
+                        elif pattern_idx in [1, 2, 3]:  # function_call tags or simple JSON
                             data = json.loads(match)
-                            tool_call = {
-                                "id": f"call_{len(tool_calls)}_{int(time.time())}",
-                                "type": "function",
-                                "function": {
-                                    "name": data.get("name", ""),
-                                    "arguments": json.dumps(data.get("arguments", {}))
-                                }
-                            }
-                            tool_calls.append(tool_call)
-                            cleaned_text = cleaned_text.replace(f"<function_call>{match}</function_call>", "")
 
-                        elif pattern_idx == 2:  # Simple JSON
-                            data = json.loads(match)
-                            tool_call = {
-                                "id": f"call_{len(tool_calls)}_{int(time.time())}",
-                                "type": "function",
-                                "function": {
-                                    "name": data.get("name", ""),
-                                    "arguments": json.dumps(data.get("arguments", {}))
+                            # Handle different JSON structures
+                            if "name" in data and "arguments" in data:
+                                # Simple format: {"name": "write", "arguments": {...}}
+                                arguments = data.get("arguments", {})
+                                if isinstance(arguments, dict):
+                                    arguments = json.dumps(arguments)
+
+                                tool_call = {
+                                    "id": data.get("id", f"call_{len(tool_calls)}_{int(time.time()*1000)}"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": data.get("name", ""),
+                                        "arguments": arguments
+                                    }
                                 }
-                            }
-                            tool_calls.append(tool_call)
-                            cleaned_text = cleaned_text.replace(match, "")
+                                tool_calls.append(tool_call)
+
+                                if pattern_idx == 1:  # function_call tags
+                                    cleaned_text = cleaned_text.replace(f"<function_call>{match}</function_call>", "")
+                                else:
+                                    cleaned_text = cleaned_text.replace(match, "")
 
                     except json.JSONDecodeError as e:
                         plugin_dbg(f"Failed to parse JSON: {e}")
@@ -266,6 +273,7 @@ Do not add any other text before or after the JSON object when calling a tool.
                 "timestamp": time.time()
             }
             plugin_dbg(f"Stored {len(tool_calls)} tool calls with key {timestamp}")
+            plugin_dbg(f"Tool calls in OpenAI format: {json.dumps(tool_calls, indent=2)}")
 
         # Clean up whitespace
         cleaned_text = re.sub(r'\n\s*\n', '\n\n', cleaned_text).strip()
