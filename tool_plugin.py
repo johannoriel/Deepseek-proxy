@@ -23,22 +23,36 @@ class ToolPlugin:
         self.enabled = enabled
         plugin_dbg(f"ToolPlugin base initialized, enabled={enabled}")
 
-    def prepare_messages(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
+    def prepare_messages(
+        self, messages: List[Dict], tools: Optional[List[Dict]] = None
+    ) -> List[Dict]:
         """Modify messages before sending to DeepSeek API."""
-        plugin_dbg(f"Base prepare_messages called with {len(messages)} messages, tools={tools is not None}")
+        plugin_dbg(
+            f"Base prepare_messages called with {len(messages)} messages, tools={tools is not None}"
+        )
         return messages
 
-    def process_response(self, response_text: str, original_messages: List[Dict]) -> Tuple[str, Optional[List[Dict]]]:
+    def process_response(
+        self, response_text: str, original_messages: List[Dict]
+    ) -> Tuple[str, Optional[List[Dict]]]:
         """Process the response text and extract tool calls if present."""
-        plugin_dbg(f"Base process_response called with response_text length={len(response_text)}")
+        plugin_dbg(
+            f"Base process_response called with response_text length={len(response_text)}"
+        )
         return response_text, None
 
-    def prepare_tool_response(self, tool_call_id: str, tool_name: str, tool_response: str, original_messages: List[Dict]) -> Dict:
+    def prepare_tool_response(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        tool_response: str,
+        original_messages: List[Dict],
+    ) -> Dict:
         """Prepare a tool response message to send back to the API."""
         plugin_dbg(f"Base prepare_tool_response called for tool {tool_name}")
         return {
             "role": "user",
-            "content": f"[Tool Response for {tool_name}]: {tool_response}"
+            "content": f"[Tool Response for {tool_name}]: {tool_response}",
         }
 
 
@@ -49,12 +63,18 @@ class NativeToolPlugin(ToolPlugin):
         super().__init__(enabled)
         plugin_dbg("NativeToolPlugin initialized")
 
-    def prepare_messages(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
-        plugin_dbg(f"NativeToolPlugin.prepare_messages called, tools={tools is not None}")
+    def prepare_messages(
+        self, messages: List[Dict], tools: Optional[List[Dict]] = None
+    ) -> List[Dict]:
+        plugin_dbg(
+            f"NativeToolPlugin.prepare_messages called, tools={tools is not None}"
+        )
         # For native support, we don't modify messages
         return messages
 
-    def process_response(self, response_text: str, original_messages: List[Dict]) -> Tuple[str, Optional[List[Dict]]]:
+    def process_response(
+        self, response_text: str, original_messages: List[Dict]
+    ) -> Tuple[str, Optional[List[Dict]]]:
         plugin_dbg("NativeToolPlugin.process_response called")
         # Native tool calls are already in the right format
         return response_text, None
@@ -102,7 +122,9 @@ class SimulatedToolPlugin(ToolPlugin):
                         req = "required" if param_name in required else "optional"
                         param_type = param_info.get("type", "string")
                         param_desc = param_info.get("description", "")
-                        prompt += f"  - {param_name} ({param_type}, {req}): {param_desc}\n"
+                        prompt += (
+                            f"  - {param_name} ({param_type}, {req}): {param_desc}\n"
+                        )
             prompt += "\n"
 
         prompt += """To use a tool, respond with a JSON object in the following format:
@@ -118,14 +140,16 @@ class SimulatedToolPlugin(ToolPlugin):
   ]
 }
 
-Do not add any other text before or after the JSON object when calling a tool.
+You may return the JSON directly, or wrapped in a markdown code block (```json ... ```). Do not add any other text before or after the JSON object when calling a tool.
 """
 
         plugin_dbg(f"Generated prompt length: {len(prompt)} characters")
         plugin_dbg(f"Prompt preview: {prompt[:200]}...")
         return prompt
 
-    def prepare_messages(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> List[Dict]:
+    def prepare_messages(
+        self, messages: List[Dict], tools: Optional[List[Dict]] = None
+    ) -> List[Dict]:
         """Add tool definitions to system message."""
         plugin_dbg("=" * 50)
         plugin_dbg("SimulatedToolPlugin.prepare_messages CALLED")
@@ -145,7 +169,9 @@ Do not add any other text before or after the JSON object when calling a tool.
         # Always add to system message (original approach)
         return self._add_to_system_message(messages, tools_prompt)
 
-    def _add_to_system_message(self, messages: List[Dict], tools_prompt: str) -> List[Dict]:
+    def _add_to_system_message(
+        self, messages: List[Dict], tools_prompt: str
+    ) -> List[Dict]:
         """Add tools prompt to system message."""
         plugin_dbg("Adding tools to system message")
 
@@ -158,10 +184,12 @@ Do not add any other text before or after the JSON object when calling a tool.
                 original_content = msg.get("content", "")
                 plugin_dbg(f"Original system content: {original_content[:100]}...")
 
-                modified_messages.append({
-                    "role": "system",
-                    "content": original_content + "\n\n" + tools_prompt
-                })
+                modified_messages.append(
+                    {
+                        "role": "system",
+                        "content": original_content + "\n\n" + tools_prompt,
+                    }
+                )
                 system_message_found = True
                 plugin_dbg("Added tools to existing system message")
             else:
@@ -169,14 +197,111 @@ Do not add any other text before or after the JSON object when calling a tool.
 
         if not system_message_found:
             plugin_dbg("No system message found, creating new one with tools")
-            modified_messages.insert(0, {
-                "role": "system",
-                "content": tools_prompt
-            })
+            modified_messages.insert(0, {"role": "system", "content": tools_prompt})
 
         return modified_messages
 
-    def process_response(self, response_text: str, original_messages: List[Dict]) -> Tuple[str, Optional[List[Dict]]]:
+    def _extract_json_blocks(self, text: str) -> List[Tuple[str, str]]:
+        """Extract JSON blocks that may contain tool calls, returning list of (raw_text, json_str)."""
+        found = []
+
+        # Strategy 1: Try parsing entire response as JSON
+        stripped = text.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                data = json.loads(stripped)
+                if self._is_tool_call_data(data):
+                    plugin_dbg("Strategy 1: Entire response is JSON tool call")
+                    return [(stripped, stripped)]
+            except json.JSONDecodeError:
+                pass
+
+        # Strategy 2: Find JSON inside markdown code blocks (with or without language tag)
+        # Matches ```json\n{...}\n``` or ```\n{...}\n```
+        code_block_pattern = r"```(?:json)?\s*\n?(.*?)\n?```"
+        for match in re.finditer(code_block_pattern, text, re.DOTALL):
+            block = match.group(1).strip()
+            if block.startswith("{") or block.startswith("["):
+                try:
+                    data = json.loads(block)
+                    if self._is_tool_call_data(data):
+                        plugin_dbg(
+                            f"Strategy 2: Found tool call in markdown code block"
+                        )
+                        found.append((match.group(0), block))
+                        continue
+                except json.JSONDecodeError:
+                    pass
+
+        if found:
+            return found
+
+        # Strategy 3: Find standalone JSON objects with tool_call patterns embedded in text
+        # Match either full tool_calls wrapper or individual {name, arguments} objects
+        json_patterns = [
+            r'\{\s*"tool_calls"\s*:\s*\[.*?\]\s*\}',
+            r'\{\s*"name"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\}',
+        ]
+
+        for pattern in json_patterns:
+            for match in re.finditer(pattern, text, re.DOTALL):
+                candidate = match.group(0)
+                try:
+                    data = json.loads(candidate)
+                    if self._is_tool_call_data(data):
+                        plugin_dbg(f"Strategy 3: Found embedded tool call via regex")
+                        found.append((candidate, candidate))
+                        break
+                except json.JSONDecodeError:
+                    pass
+            if found:
+                break
+
+        return found
+
+    def _is_tool_call_data(self, data: Any) -> bool:
+        """Check if parsed JSON data contains tool call structure."""
+        if isinstance(data, dict):
+            if (
+                "tool_calls" in data
+                and isinstance(data["tool_calls"], list)
+                and len(data["tool_calls"]) > 0
+            ):
+                return True
+            if "name" in data and "arguments" in data:
+                return True
+        return False
+
+    def _convert_to_openai_format(self, data: Dict) -> List[Dict]:
+        """Convert extracted JSON data to OpenAI tool_call format."""
+        tool_calls = []
+        items = []
+
+        if "tool_calls" in data:
+            items = data["tool_calls"]
+        elif "name" in data:
+            items = [data]
+
+        for tc in items:
+            arguments = tc.get("arguments", {})
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments)
+
+            tool_call = {
+                "id": tc.get("id", f"call_{len(tool_calls)}_{int(time.time() * 1000)}"),
+                "type": "function",
+                "function": {
+                    "name": tc.get("name", tc.get("function", {}).get("name", "")),
+                    "arguments": arguments,
+                },
+            }
+            tool_calls.append(tool_call)
+
+        return tool_calls
+
+    def process_response(
+        self, response_text: str, original_messages: List[Dict]
+    ) -> Tuple[str, Optional[List[Dict]]]:
         """Extract tool calls from response text."""
         plugin_dbg("=" * 50)
         plugin_dbg("SimulatedToolPlugin.process_response CALLED")
@@ -186,83 +311,18 @@ Do not add any other text before or after the JSON object when calling a tool.
         tool_calls = []
         cleaned_text = response_text
 
-        # Try multiple patterns
-        patterns = [
-            # Pattern 1: Your working format with tool_calls array
-            r'{\s*"tool_calls"\s*:\s*\[\s*{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*{[^}]*}\s*}\s*]\s*}',
+        blocks = self._extract_json_blocks(response_text)
+        plugin_dbg(f"Found {len(blocks)} JSON block(s) containing tool calls")
 
-            # Pattern 2: Original format with function_call tags
-            r'<function_call>\s*({.*?})\s*</function_call>',
-
-            # Pattern 3: Just a JSON object with name and arguments
-            r'{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*{[^}]*}\s*}',
-
-            # Pattern 4: Tool call with function name and arguments (like your example)
-            r'{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*{[^}]*}(?:\s*,\s*"id"\s*:\s*"[^"]*")?\s*}',
-        ]
-
-        for pattern_idx, pattern in enumerate(patterns):
-            plugin_dbg(f"Trying pattern {pattern_idx + 1}")
-            matches = re.findall(pattern, response_text, re.DOTALL)
-
-            if matches:
-                plugin_dbg(f"Found {len(matches)} matches with pattern {pattern_idx + 1}")
-
-                for i, match in enumerate(matches):
-                    plugin_dbg(f"Match {i}: {match[:100]}...")
-                    try:
-                        # Handle different match types
-                        if pattern_idx == 0:  # Full tool_calls format
-                            data = json.loads(match)
-                            for tc in data.get("tool_calls", []):
-                                # Ensure arguments is a string (OpenAI format expects string)
-                                arguments = tc.get("arguments", {})
-                                if isinstance(arguments, dict):
-                                    arguments = json.dumps(arguments)
-
-                                tool_call = {
-                                    "id": tc.get("id", f"call_{len(tool_calls)}_{int(time.time()*1000)}"),
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.get("name", ""),
-                                        "arguments": arguments
-                                    }
-                                }
-                                tool_calls.append(tool_call)
-                                cleaned_text = cleaned_text.replace(match, "")
-
-                        elif pattern_idx in [1, 2, 3]:  # function_call tags or simple JSON
-                            data = json.loads(match)
-
-                            # Handle different JSON structures
-                            if "name" in data and "arguments" in data:
-                                # Simple format: {"name": "write", "arguments": {...}}
-                                arguments = data.get("arguments", {})
-                                if isinstance(arguments, dict):
-                                    arguments = json.dumps(arguments)
-
-                                tool_call = {
-                                    "id": data.get("id", f"call_{len(tool_calls)}_{int(time.time()*1000)}"),
-                                    "type": "function",
-                                    "function": {
-                                        "name": data.get("name", ""),
-                                        "arguments": arguments
-                                    }
-                                }
-                                tool_calls.append(tool_call)
-
-                                if pattern_idx == 1:  # function_call tags
-                                    cleaned_text = cleaned_text.replace(f"<function_call>{match}</function_call>", "")
-                                else:
-                                    cleaned_text = cleaned_text.replace(match, "")
-
-                    except json.JSONDecodeError as e:
-                        plugin_dbg(f"Failed to parse JSON: {e}")
-                        continue
-
-                # If we found matches, break out of pattern loop
-                if tool_calls:
-                    break
+        for raw_text, json_str in blocks:
+            try:
+                data = json.loads(json_str)
+                extracted = self._convert_to_openai_format(data)
+                tool_calls.extend(extracted)
+                cleaned_text = cleaned_text.replace(raw_text, "")
+            except json.JSONDecodeError as e:
+                plugin_dbg(f"Failed to parse JSON block: {e}")
+                continue
 
         plugin_dbg(f"Total tool calls extracted: {len(tool_calls)}")
 
@@ -270,21 +330,27 @@ Do not add any other text before or after the JSON object when calling a tool.
             timestamp = str(time.time())
             self.pending_tool_calls[timestamp] = {
                 "tool_calls": tool_calls,
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
             plugin_dbg(f"Stored {len(tool_calls)} tool calls with key {timestamp}")
-            plugin_dbg(f"Tool calls in OpenAI format: {json.dumps(tool_calls, indent=2)}")
+            plugin_dbg(
+                f"Tool calls in OpenAI format: {json.dumps(tool_calls, indent=2)}"
+            )
 
-        # Clean up whitespace
-        cleaned_text = re.sub(r'\n\s*\n', '\n\n', cleaned_text).strip()
+        cleaned_text = re.sub(r"\n\s*\n", "\n\n", cleaned_text).strip()
         plugin_dbg(f"Cleaned text length: {len(cleaned_text)}")
         plugin_dbg(f"Returning {len(tool_calls)} tool calls")
         plugin_dbg("=" * 50)
 
         return cleaned_text, tool_calls if tool_calls else None
 
-
-    def prepare_tool_response(self, tool_call_id: str, tool_name: str, tool_response: str, original_messages: List[Dict]) -> Dict:
+    def prepare_tool_response(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        tool_response: str,
+        original_messages: List[Dict],
+    ) -> Dict:
         """Convert tool response to a user message that the model can understand."""
         plugin_dbg("=" * 50)
         plugin_dbg("SimulatedToolPlugin.prepare_tool_response CALLED")
@@ -295,7 +361,7 @@ Do not add any other text before or after the JSON object when calling a tool.
 
         result = {
             "role": "user",
-            "content": f"The result of calling {tool_name} (ID: {tool_call_id}) is:\n\n{tool_response}\n\nPlease continue with your response based on this result."
+            "content": f"The result of calling {tool_name} (ID: {tool_call_id}) is:\n\n{tool_response}\n\nPlease continue with your response based on this result.",
         }
 
         plugin_dbg(f"Created response message: {result['content'][:100]}...")
@@ -308,14 +374,18 @@ Do not add any other text before or after the JSON object when calling a tool.
         # Look for assistant messages with tool calls in the recent history
         for msg in reversed(messages[-10:]):  # Check last 10 messages
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                plugin_dbg(f"Found assistant message with tool calls, expecting response")
+                plugin_dbg(
+                    f"Found assistant message with tool calls, expecting response"
+                )
                 return True
         plugin_dbg("No pending tool calls found")
         return False
 
 
 # Plugin factory
-def create_tool_plugin(plugin_type: str = "simulated", enabled: bool = False) -> ToolPlugin:
+def create_tool_plugin(
+    plugin_type: str = "simulated", enabled: bool = False
+) -> ToolPlugin:
     """Factory function to create the appropriate tool plugin."""
     plugin_dbg(f"create_tool_plugin called with type={plugin_type}, enabled={enabled}")
 
