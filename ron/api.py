@@ -103,13 +103,17 @@ class DeepSeekAPI:
                     timeout=None
                 )
 
+                # Check for HTML/Cloudflare response
                 if "<!DOCTYPE html>" in response.text and "Just a moment" in response.text:
                     print("\033[93mWarning: Cloudflare protection detected. Bypassing...\033[0m", file=sys.stderr)
                     if retry_count < max_retries - 1:
                         self._refresh_cookies()
                         retry_count += 1
                         continue
+                    else:
+                        raise CloudflareError("Failed to bypass Cloudflare protection after all retries")
 
+                # Check status codes
                 if response.status_code == 401:
                     raise AuthenticationError("Invalid or expired authentication token")
                 elif response.status_code == 429:
@@ -117,14 +121,25 @@ class DeepSeekAPI:
                 elif response.status_code >= 500:
                     raise APIError(f"Server error occurred: {response.text}", response.status_code)
                 elif response.status_code != 200:
-                    raise APIError(f"API request failed: {response.text}", response.status_code)
+                    raise APIError(f"API request failed with status {response.status_code}: {response.text}", response.status_code)
 
-                return response.json()
+                # Parse JSON response
+                try:
+                    json_response = response.json()
+                except json.JSONDecodeError as e:
+                    raise APIError(f"Invalid JSON response from server (first 200 chars): {response.text[:200]}")
+
+                # Log the response for debugging (optional)
+                dbg(f"API Response for {endpoint}: status={response.status_code}, has_data={bool(json_response.get('data'))}")
+
+                return json_response
 
             except requests.exceptions.RequestException as e:
                 raise NetworkError(f"Network error occurred: {str(e)}")
-            except json.JSONDecodeError:
-                raise APIError("Invalid JSON response from server")
+            except (AuthenticationError, RateLimitError, APIError, CloudflareError):
+                raise
+            except Exception as e:
+                raise APIError(f"Unexpected error in request: {str(e)}")
 
         raise APIError("Failed to bypass Cloudflare protection after multiple attempts")
 
@@ -147,9 +162,44 @@ class DeepSeekAPI:
                 '/chat_session/create',
                 {'character_id': None}
             )
+
+            # Add detailed error checking
+            if not response:
+                raise APIError("Empty response received from server when creating chat session")
+
+            if not isinstance(response, dict):
+                raise APIError(f"Unexpected response type: {type(response)}. Expected dict")
+
+            if 'data' not in response:
+                raise APIError(f"Missing 'data' field in response: {response}")
+
+            if response['data'] is None:
+                raise APIError(f"'data' field is None in response. Full response: {response}")
+
+            if 'biz_data' not in response['data']:
+                raise APIError(f"Missing 'biz_data' field in response['data']: {response['data']}")
+
+            if 'id' not in response['data']['biz_data']:
+                raise APIError(f"Missing 'id' field in response['data']['biz_data']: {response['data']['biz_data']}")
+
             return response['data']['biz_data']['id']
-        except KeyError:
-            raise APIError("Invalid session creation response format from server")
+
+        except KeyError as e:
+            raise APIError(f"Invalid session creation response format from server: missing key {e}. Full response: {response if 'response' in locals() else 'No response'}")
+        except Exception as e:
+            raise APIError(f"Failed to create chat session: {str(e)}")
+
+    def create_chat_session_with_retry(self, max_retries: int = 3) -> str:
+        """Creates a new chat session with retry logic."""
+        for attempt in range(max_retries):
+            try:
+                return self.create_chat_session()
+            except APIError as e:
+                if attempt == max_retries - 1:
+                    raise
+                dbg(f"Session creation failed (attempt {attempt + 1}/{max_retries}): {e}")
+                time.sleep(2 ** attempt)  # Exponential backoff
+        raise APIError("Failed to create chat session after all retries")
 
     def _parse_tool_calls_from_stream(self, data_lines: List[str]) -> Tuple[Optional[List[Dict]], str]:
         """Parse tool calls from streaming response data."""
