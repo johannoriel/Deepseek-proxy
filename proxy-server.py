@@ -131,6 +131,12 @@ def dbg(msg):
     print(f"[DEBUG] {msg}", file=sys.stderr, flush=True)
 
 
+def strip_finished(text):
+    if text and text.endswith("FINISHED"):
+        return text[:-8].rstrip()
+    return text
+
+
 class WaitingIndicator:
     def __init__(self):
         self.start_time = None
@@ -815,7 +821,10 @@ def chat_completions():
                             response_text = response_data.get("content", "")
                             tool_calls = response_data.get("tool_calls")
 
-                        assistant_msg = {"role": "assistant", "content": response_text}
+                        assistant_msg = {
+                            "role": "assistant",
+                            "content": strip_finished(response_text),
+                        }
                         if tool_calls:
                             assistant_msg["tool_calls"] = tool_calls
                             dbg(f"    Response had {len(tool_calls)} tool calls")
@@ -1049,7 +1058,10 @@ def handle_normal_response(
             else:
                 tool_calls = None
 
-            assistant_message = {"role": "assistant", "content": response_text}
+            assistant_message = {
+                "role": "assistant",
+                "content": strip_finished(response_text),
+            }
             if tool_calls:
                 assistant_message["tool_calls"] = tool_calls
                 dbg(f"handle_normal: Extracted {len(tool_calls)} tool calls via plugin")
@@ -1057,7 +1069,7 @@ def handle_normal_response(
             message_id = response_data.get("message_id")
             assistant_message = {
                 "role": "assistant",
-                "content": response_data.get("content", ""),
+                "content": strip_finished(response_data.get("content", "")),
             }
             if "tool_calls" in response_data:
                 assistant_message["tool_calls"] = response_data["tool_calls"]
@@ -1182,6 +1194,8 @@ def handle_streaming_response(
                 message_id = response_data.get("message_id")
                 tool_calls = response_data.get("tool_calls")
                 has_tool_calls = tool_calls is not None
+
+            response_text = strip_finished(response_text)
 
             # Update conversation state with the assistant message
             assistant_message = {"role": "assistant", "content": response_text}
