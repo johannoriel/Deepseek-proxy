@@ -36,7 +36,6 @@ replace_system = False  # New global flag for system message replacement
 session_cache = {}
 cache_lock = Lock()
 
-# Add these global variables at the top of proxy-server.py (after the other global declarations)
 session_state = {}  # session_id -> {'deepseek_id': str, 'last_msg_id': int, 'conversation': list, 'last_hash': str}
 session_lock = Lock()  # For thread safety
 # Also add a cache for session_id to deepseek session mapping
@@ -745,6 +744,8 @@ def chat_completions():
         # Create new session if none found
         if not deepseek_session_id:
             dbg("No existing session found, creating new DeepSeek session")
+            message_counter = 0
+            conversation_lengths = []
             deepseek_session_id = deepseek_api.create_chat_session()
             session_id = str(uuid.uuid4())
             last_message_id = None
