@@ -442,7 +442,7 @@ class DeepSeekAPI:
                     )
                     time.sleep(retry_delay)
                     total_waited += retry_delay
-                    retry_delay = min(retry_delay * 2, 60)
+                    retry_delay = retry_delay * 2
                     continue
                 raise
 
