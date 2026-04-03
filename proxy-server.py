@@ -709,37 +709,48 @@ def chat_completions():
 
             if last_user_idx is not None:
                 history_before_final = conversation_for_hash[:last_user_idx]
-                history_hash_key = history_hash(history_before_final)
-                dbg(f"History hash: {history_hash_key[:16]}...")
                 dbg(f"History before final has {len(history_before_final)} messages")
 
-                with cache_lock:
-                    if history_hash_key in session_cache:
-                        cached = session_cache[history_hash_key]
-                        deepseek_session_id = cached["deepseek_session_id"]
-                        last_message_id = cached["last_message_id"]
-                        session_id = cached.get("session_id")
-                        dbg(
-                            f"Found session by history hash: {session_id}, last_message_id={last_message_id}"
-                        )
-                        dbg(f"  Cached turn_count: {cached.get('turn_count')}")
+                # Only consult cache when there is prior history
+                if history_before_final:
+                    history_hash_key = history_hash(history_before_final)
+                    dbg(f"History hash: {history_hash_key[:16]}...")
 
-                        # Load conversation state
-                        if session_id and session_id in session_state:
-                            conversation_state = session_state[session_id]
+                    with cache_lock:
+                        if history_hash_key in session_cache:
+                            cached = session_cache[history_hash_key]
+                            deepseek_session_id = cached["deepseek_session_id"]
+                            last_message_id = cached["last_message_id"]
+                            session_id = cached.get("session_id")
                             dbg(
-                                f"Loaded conversation state with {len(conversation_state.get('conversation', []))} messages"
+                                f"Found session by history hash: {session_id}, last_message_id={last_message_id}"
                             )
+                            dbg(f"  Cached turn_count: {cached.get('turn_count')}")
 
-                            # Add new messages
-                            prev_len = len(conversation_state.get("conversation", []))
-                            for msg in processed_messages:
-                                if msg.get("role") != "system":
-                                    conversation_state["conversation"].append(msg)
-                            new_len = len(conversation_state.get("conversation", []))
-                            dbg(f"  Added messages: prev={prev_len}, new={new_len}")
+                            # Load conversation state
+                            if session_id and session_id in session_state:
+                                conversation_state = session_state[session_id]
+                                dbg(
+                                    f"Loaded conversation state with {len(conversation_state.get('conversation', []))} messages"
+                                )
 
-                            conversation_state["last_accessed"] = time.time()
+                                # Add new messages
+                                prev_len = len(
+                                    conversation_state.get("conversation", [])
+                                )
+                                for msg in processed_messages:
+                                    if msg.get("role") != "system":
+                                        conversation_state["conversation"].append(msg)
+                                new_len = len(
+                                    conversation_state.get("conversation", [])
+                                )
+                                dbg(f"  Added messages: prev={prev_len}, new={new_len}")
+
+                                conversation_state["last_accessed"] = time.time()
+                else:
+                    dbg(
+                        "Empty history → skipping cache lookup, will create new session"
+                    )
 
         # Create new session if none found
         if not deepseek_session_id:
@@ -850,7 +861,8 @@ def chat_completions():
             dbg(f"Final conversation length: {len(conversation_state['conversation'])}")
 
             # Cache the session
-            if last_user_idx is not None:
+            if last_user_idx is not None and history_before_final:
+                history_hash_key = history_hash(history_before_final)
                 with cache_lock:
                     session_cache[history_hash_key] = {
                         "session_id": session_id,
