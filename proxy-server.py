@@ -1033,7 +1033,10 @@ Please continue with the task. Based on these results, what should be the next s
         import traceback
 
         traceback.print_exc(file=sys.stderr)
-        return jsonify({"error": str(e)}), 500
+        status_code = 500
+        if hasattr(e, "status_code") and e.status_code == 429:
+            status_code = 429
+        return jsonify({"error": str(e)}), status_code
 
 
 def handle_normal_response(
@@ -1057,6 +1060,15 @@ def handle_normal_response(
             tools=tools,
             tool_choice=tool_choice,
         )
+
+        # Detect empty responses
+        if isinstance(response_data, tuple):
+            response_text, message_id = response_data
+            if not response_text:
+                dbg(
+                    f"EMPTY RESPONSE from DeepSeek! Input prompt (len={len(user_message)}): {user_message[:200]}..."
+                )
+                dbg(f"  message_id={message_id}, session={deepseek_session_id}")
 
         # Handle different response formats
         if isinstance(response_data, tuple):
@@ -1187,6 +1199,15 @@ def handle_streaming_response(
                 tools=tools,
                 tool_choice=tool_choice,
             )
+
+            # Detect empty responses
+            if isinstance(response_data, tuple):
+                response_text, message_id = response_data
+                if not response_text:
+                    dbg(
+                        f"EMPTY RESPONSE (streaming) from DeepSeek! Input prompt (len={len(user_message)}): {user_message[:200]}..."
+                    )
+                    dbg(f"  message_id={message_id}, session={deepseek_session_id}")
 
             # Handle different response formats
             if isinstance(response_data, tuple):
