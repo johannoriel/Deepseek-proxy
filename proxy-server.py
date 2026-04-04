@@ -753,7 +753,7 @@ def chat_completions():
                                 )
                                 dbg(f"  Added messages: prev={prev_len}, new={new_len}")
 
-                                conversation_state["last_accessed"] = time.time()
+                                last_message_id = None
                 else:
                     dbg(
                         "Empty history → skipping cache lookup, will create new session"
