@@ -803,7 +803,7 @@ def chat_completions():
             dbg(f"Replaying {len(replay_messages)} messages for new session")
             for idx, msg in enumerate(replay_messages):
                 dbg(
-                    f"  Replay message {idx}: role={msg['role']}, content_len={len(msg.get('content', ''))}"
+                    f"  Replay message {idx}: role={msg['role']}, content_len={len(msg.get('content') or '')}"
                 )
 
             current_parent_id = None
