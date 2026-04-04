@@ -73,18 +73,21 @@ TOOLS = [
 # Fake tool executor (runs locally, simulates real tool results)
 # ---------------------------------------------------------------------------
 
+
 def execute_tool(name: str, arguments: dict) -> str:
     if name == "get_weather":
         city = arguments.get("city", "Unknown")
         unit = arguments.get("unit", "celsius")
         temp = 22 if unit == "celsius" else 72
-        return json.dumps({
-            "city": city,
-            "temperature": temp,
-            "unit": unit,
-            "condition": "Partly cloudy",
-            "humidity": "60%",
-        })
+        return json.dumps(
+            {
+                "city": city,
+                "temperature": temp,
+                "unit": unit,
+                "condition": "Partly cloudy",
+                "humidity": "60%",
+            }
+        )
     elif name == "calculate":
         expr = arguments.get("expression", "")
         try:
@@ -100,9 +103,11 @@ def execute_tool(name: str, arguments: dict) -> str:
     else:
         return json.dumps({"error": f"Unknown tool: {name}"})
 
+
 # ---------------------------------------------------------------------------
 # Result tracking
 # ---------------------------------------------------------------------------
+
 
 class TestResults:
     def __init__(self):
@@ -125,9 +130,11 @@ class TestResults:
         color = "green" if passed == total else "red"
         console.print(f"[{color}]{passed}/{total} checks passed[/{color}]")
 
+
 # ---------------------------------------------------------------------------
 # Core test runner
 # ---------------------------------------------------------------------------
+
 
 def run_tests(client: OpenAI, model: str, console: Console, results: TestResults):
     messages: list[dict[str, Any]] = []
@@ -177,7 +184,9 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
             str(resp.usage) if resp.usage else "missing",
         )
 
-        console.print(Panel(assistant_msg.content or "(empty)", title="Assistant", style="blue"))
+        console.print(
+            Panel(assistant_msg.content or "(empty)", title="Assistant", style="blue")
+        )
         messages.append({"role": "assistant", "content": assistant_msg.content})
 
     except (APIConnectionError, APIStatusError) as e:
@@ -189,7 +198,9 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
     # TURN 2 — Tool call round-trip (get_weather)
     # ═══════════════════════════════════════════════════════════════════════
     console.print(Rule("[bold cyan]Turn 2 — Tool call: get_weather"))
-    messages.append({"role": "user", "content": "What is the weather like in Paris right now?"})
+    messages.append(
+        {"role": "user", "content": "What is the weather like in Paris right now?"}
+    )
 
     try:
         resp = client.chat.completions.create(
@@ -215,9 +226,13 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
         results.record("Turn 2: tool_calls list present", called_tool)
 
         if not called_tool:
-            console.print("[yellow]Server did not issue a tool call — skipping tool round-trip.[/yellow]")
+            console.print(
+                "[yellow]Server did not issue a tool call — skipping tool round-trip.[/yellow]"
+            )
             # Still add assistant message and continue
-            messages.append({"role": "assistant", "content": assistant_msg.content or ""})
+            messages.append(
+                {"role": "assistant", "content": assistant_msg.content or ""}
+            )
         else:
             tool_call = assistant_msg.tool_calls[0]
             fn_name = tool_call.function.name
@@ -236,7 +251,9 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
             except json.JSONDecodeError:
                 fn_args = {}
                 args_valid = False
-            results.record("Turn 2: tool arguments are valid JSON", args_valid, fn_args_raw[:80])
+            results.record(
+                "Turn 2: tool arguments are valid JSON", args_valid, fn_args_raw[:80]
+            )
 
             console.print(f"[yellow]Tool call:[/yellow] {fn_name}({fn_args})")
 
@@ -245,16 +262,20 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
             console.print(f"[yellow]Tool result:[/yellow] {tool_result}")
 
             # Append assistant tool-call message + tool result message
-            messages.append({
-                "role": "assistant",
-                "content": assistant_msg.content,
-                "tool_calls": [tc.model_dump() for tc in assistant_msg.tool_calls],
-            })
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": tool_result,
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_msg.content,
+                    "tool_calls": [tc.model_dump() for tc in assistant_msg.tool_calls],
+                }
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result,
+                }
+            )
 
             # Follow-up: let assistant incorporate the tool result
             resp2 = client.chat.completions.create(
@@ -276,7 +297,9 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
                 bool(final_content.strip()),
                 final_content[:80],
             )
-            console.print(Panel(final_content, title="Assistant (after tool)", style="blue"))
+            console.print(
+                Panel(final_content, title="Assistant (after tool)", style="blue")
+            )
             messages.append({"role": "assistant", "content": final_content})
 
     except (APIConnectionError, APIStatusError) as e:
@@ -287,7 +310,9 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
     # TURN 3 — Second tool call (calculate) to confirm tool infra is stable
     # ═══════════════════════════════════════════════════════════════════════
     console.print(Rule("[bold cyan]Turn 3 — Tool call: calculate"))
-    messages.append({"role": "user", "content": "Can you calculate (123 * 456) + 789 for me?"})
+    messages.append(
+        {"role": "user", "content": "Can you calculate (123 * 456) + 789 for me?"}
+    )
 
     try:
         resp = client.chat.completions.create(
@@ -299,7 +324,9 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
         )
         choice = resp.choices[0]
         assistant_msg = choice.message
-        called_tool = choice.finish_reason == "tool_calls" and bool(assistant_msg.tool_calls)
+        called_tool = choice.finish_reason == "tool_calls" and bool(
+            assistant_msg.tool_calls
+        )
 
         results.record("Turn 3: tool_calls for calculate", called_tool)
 
@@ -311,16 +338,20 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
             console.print(f"[yellow]Tool call:[/yellow] {fn_name}({fn_args})")
             console.print(f"[yellow]Tool result:[/yellow] {tool_result}")
 
-            messages.append({
-                "role": "assistant",
-                "content": assistant_msg.content,
-                "tool_calls": [tc.model_dump() for tc in assistant_msg.tool_calls],
-            })
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": tool_result,
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_msg.content,
+                    "tool_calls": [tc.model_dump() for tc in assistant_msg.tool_calls],
+                }
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result,
+                }
+            )
 
             resp2 = client.chat.completions.create(
                 model=model,
@@ -329,7 +360,9 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
                 stream=False,
             )
             final_content = resp2.choices[0].message.content or ""
-            console.print(Panel(final_content, title="Assistant (after tool)", style="blue"))
+            console.print(
+                Panel(final_content, title="Assistant (after tool)", style="blue")
+            )
             messages.append({"role": "assistant", "content": final_content})
         else:
             # Model answered directly
@@ -345,7 +378,9 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
     # TURN 4 — Streaming (SSE) reply
     # ═══════════════════════════════════════════════════════════════════════
     console.print(Rule("[bold cyan]Turn 4 — Streaming (SSE)"))
-    messages.append({"role": "user", "content": "Summarize what we talked about in 2-3 sentences."})
+    messages.append(
+        {"role": "user", "content": "Summarize what we talked about in 2-3 sentences."}
+    )
 
     try:
         stream = client.chat.completions.create(
@@ -381,7 +416,11 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
             f"finish_reason: {finish_reason}[/dim]"
         )
 
-        results.record("Turn 4: streaming received chunks", chunk_count > 1, f"{chunk_count} chunks")
+        results.record(
+            "Turn 4: streaming received chunks",
+            chunk_count > 1,
+            f"{chunk_count} chunks",
+        )
         results.record(
             "Turn 4: streamed content non-empty",
             bool(collected_text.strip()),
@@ -408,7 +447,12 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
     # TURN 5 — Streaming tool call
     # ═══════════════════════════════════════════════════════════════════════
     console.print(Rule("[bold cyan]Turn 5 — Streaming tool call"))
-    messages.append({"role": "user", "content": "One more thing: what's the weather in Tokyo? (stream this)"})
+    messages.append(
+        {
+            "role": "user",
+            "content": "One more thing: what's the weather in Tokyo? (stream this)",
+        }
+    )
 
     try:
         stream = client.chat.completions.create(
@@ -447,11 +491,17 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
                         tool_call_chunks[idx]["id"] = tc_delta.id
                     if tc_delta.function:
                         if tc_delta.function.name:
-                            tool_call_chunks[idx]["function"]["name"] += tc_delta.function.name
+                            tool_call_chunks[idx]["function"]["name"] += (
+                                tc_delta.function.name
+                            )
                         if tc_delta.function.arguments:
-                            tool_call_chunks[idx]["function"]["arguments"] += tc_delta.function.arguments
+                            tool_call_chunks[idx]["function"]["arguments"] += (
+                                tc_delta.function.arguments
+                            )
 
-        got_streaming_tool_call = finish_reason == "tool_calls" and bool(tool_call_chunks)
+        got_streaming_tool_call = finish_reason == "tool_calls" and bool(
+            tool_call_chunks
+        )
         results.record(
             "Turn 5: streaming tool call detected",
             got_streaming_tool_call,
@@ -472,16 +522,20 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
                 f"got '{fn_name}'",
             )
 
-            messages.append({
-                "role": "assistant",
-                "content": text_chunks or None,
-                "tool_calls": list(tool_call_chunks.values()),
-            })
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": tool_result,
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": text_chunks or None,
+                    "tool_calls": list(tool_call_chunks.values()),
+                }
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": tool_result,
+                }
+            )
 
             # Final follow-up (non-streaming)
             resp_final = client.chat.completions.create(
@@ -490,11 +544,115 @@ def run_tests(client: OpenAI, model: str, console: Console, results: TestResults
                 stream=False,
             )
             final_text = resp_final.choices[0].message.content or ""
-            console.print(Panel(final_text, title="Assistant (after streamed tool)", style="blue"))
+            console.print(
+                Panel(final_text, title="Assistant (after streamed tool)", style="blue")
+            )
 
     except (APIConnectionError, APIStatusError) as e:
         results.record("Turn 5: streaming tool call / no exception", False, str(e))
         console.print(f"[red]Turn 5 failed: {e}[/red]")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TURN 6 — JSON response format (response_format)
+    # ═══════════════════════════════════════════════════════════════════════
+    console.print(Rule("[bold cyan]Turn 6 — JSON response format"))
+    messages.append(
+        {
+            "role": "user",
+            "content": "Return a JSON object with keys 'name' and 'role' for a developer.",
+        }
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[system_msg] + messages,
+            response_format={"type": "json_object"},
+            stream=False,
+        )
+        choice = resp.choices[0]
+        assistant_msg = choice.message
+
+        results.record("Turn 6: HTTP 200 / no exception", True)
+        results.record(
+            "Turn 6: finish_reason is 'stop'",
+            choice.finish_reason == "stop",
+            f"got '{choice.finish_reason}'",
+        )
+
+        response_text = assistant_msg.content or ""
+        console.print(Panel(response_text, title="Assistant (JSON)", style="blue"))
+
+        # Verify response is valid JSON
+        try:
+            parsed_json = json.loads(response_text)
+            results.record(
+                "Turn 6: response is valid JSON", True, str(parsed_json)[:50]
+            )
+            has_required_keys = "name" in parsed_json and "role" in parsed_json
+            results.record(
+                "Turn 6: JSON has 'name' and 'role' keys",
+                has_required_keys,
+                str(parsed_json)[:50],
+            )
+        except json.JSONDecodeError as e:
+            results.record("Turn 6: response is valid JSON", False, str(e))
+            results.record(
+                "Turn 6: JSON has 'name' and 'role' keys", False, "parse failed"
+            )
+
+        messages.append({"role": "assistant", "content": response_text})
+
+    except (APIConnectionError, APIStatusError) as e:
+        results.record("Turn 6: HTTP 200 / no exception", False, str(e))
+        console.print(f"[red]Turn 6 failed: {e}[/red]")
+        _abort(console)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TURN 7 — Continue conversation after JSON response (session integrity)
+    # ═══════════════════════════════════════════════════════════════════════
+    console.print(Rule("[bold cyan]Turn 7 — Continue after JSON response"))
+    messages.append(
+        {"role": "user", "content": "What is my name from the JSON I gave you?"}
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[system_msg] + messages,
+            stream=False,
+        )
+        choice = resp.choices[0]
+        assistant_msg = choice.message
+
+        results.record("Turn 7: HTTP 200 / no exception", True)
+        results.record(
+            "Turn 7: finish_reason is 'stop'",
+            choice.finish_reason == "stop",
+            f"got '{choice.finish_reason}'",
+        )
+
+        response_text = assistant_msg.content or ""
+        console.print(Panel(response_text, title="Assistant (follow-up)", style="blue"))
+
+        # Verify model can "see" the JSON response from Turn 6
+        # The response should reference something from the JSON
+        response_lower = response_text.lower()
+        # Check if response mentions something related to the JSON keys
+        # (e.g., "name", "developer", or the actual value from Turn 6)
+        references_json = any(kw in response_lower for kw in ["name", "developer"])
+        results.record(
+            "Turn 7: conversation continued (references Turn 6)",
+            references_json,
+            response_text[:80],
+        )
+
+        messages.append({"role": "assistant", "content": response_text})
+
+    except (APIConnectionError, APIStatusError) as e:
+        results.record("Turn 7: HTTP 200 / no exception", False, str(e))
+        console.print(f"[red]Turn 7 failed: {e}[/red]")
+        _abort(console)
 
 
 def _abort(console: Console):
@@ -505,6 +663,7 @@ def _abort(console: Console):
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser(description="OpenAI-compatible server test client")
@@ -532,14 +691,16 @@ def main():
     args = parser.parse_args()
 
     console = Console()
-    console.print(Panel(
-        f"[bold]OpenAI-compatible server test[/bold]\n"
-        f"Base URL : {args.base_url}\n"
-        f"Model    : {args.model}\n"
-        f"Timeout  : {args.timeout}s",
-        title="Config",
-        style="cyan",
-    ))
+    console.print(
+        Panel(
+            f"[bold]OpenAI-compatible server test[/bold]\n"
+            f"Base URL : {args.base_url}\n"
+            f"Model    : {args.model}\n"
+            f"Timeout  : {args.timeout}s",
+            title="Config",
+            style="cyan",
+        )
+    )
 
     client = OpenAI(
         base_url=args.base_url,

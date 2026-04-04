@@ -592,6 +592,7 @@ def chat_completions():
         stream = data.get("stream", False)
         tools = data.get("tools", None)
         tool_choice = data.get("tool_choice", "auto")
+        response_format = data.get("response_format", None)
 
         client_session_id = data.get("session_id", None)
 
@@ -630,6 +631,13 @@ def chat_completions():
 
         # Replace system messages if enabled
         processed_messages = replace_system_messages(messages)
+
+        # Translate response_format to text instruction (only for API call, not stored)
+        json_instruction = None
+        if response_format and response_format.get("type") == "json_object":
+            json_instruction = (
+                "Your response must be ONLY valid JSON, no additional text."
+            )
 
         # Try to find existing session
         deepseek_session_id = None
@@ -1021,6 +1029,7 @@ Please continue with the task. Based on these results, what should be the next s
                 processed_messages,
                 session_id,
                 conversation_state,
+                json_instruction,
             )
         else:
             result = handle_normal_response(
@@ -1033,6 +1042,7 @@ Please continue with the task. Based on these results, what should be the next s
                 processed_messages,
                 session_id,
                 conversation_state,
+                json_instruction,
             )
             if slowdown_seconds > 0:
                 dbg(f"Slowing down by {slowdown_seconds}s after API call")
@@ -1060,13 +1070,18 @@ def handle_normal_response(
     original_messages=None,
     session_id=None,
     conversation_state=None,
+    json_instruction=None,
 ):
     try:
         waiting.start()
+        # Append JSON instruction if present (only for API call, not stored)
+        prompt = user_message
+        if json_instruction:
+            prompt = f"{user_message}\n\n{json_instruction}"
         # Call DeepSeek API
         response_data = deepseek_api.chat_completion(
             deepseek_session_id,
-            user_message,
+            prompt,
             parent_message_id=parent_message_id,
             tools=tools,
             tool_choice=tool_choice,
@@ -1196,16 +1211,21 @@ def handle_streaming_response(
     original_messages=None,
     session_id=None,
     conversation_state=None,
+    json_instruction=None,
 ):
     from flask import Response, stream_with_context
 
     def generate():
         try:
             waiting.start()
+            # Append JSON instruction if present (only for API call, not stored)
+            prompt = user_message
+            if json_instruction:
+                prompt = f"{user_message}\n\n{json_instruction}"
             # Call DeepSeek API
             response_data = deepseek_api.chat_completion(
                 deepseek_session_id,
-                user_message,
+                prompt,
                 parent_message_id=parent_message_id,
                 tools=tools,
                 tool_choice=tool_choice,
