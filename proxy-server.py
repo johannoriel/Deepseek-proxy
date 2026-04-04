@@ -97,22 +97,22 @@ def log_conversation_composition(conversation_state, label="Conversation"):
         if role == "assistant":
             if "tool_calls" in msg:
                 details.append(f"tool_calls={len(msg['tool_calls'])}")
-            content_len = len(msg.get("content", ""))
+            content_len = len((msg.get("content") or ""))
             details.append(f"content_len={content_len}")
 
         elif role == "user":
-            content_len = len(msg.get("content", ""))
+            content_len = len((msg.get("content") or ""))
             details.append(f"content_len={content_len}")
 
         elif role == "tool":
             tool_call_id = msg.get("tool_call_id", "unknown")
-            content_len = len(msg.get("content", ""))
+            content_len = len((msg.get("content") or ""))
             details.append(
                 f"tool_call_id={tool_call_id[:20]}..., content_len={content_len}"
             )
 
         elif role == "system":
-            content_len = len(msg.get("content", ""))
+            content_len = len((msg.get("content") or ""))
             details.append(f"content_len={content_len}")
 
         detail_str = f" [{', '.join(details)}]" if details else ""
@@ -199,7 +199,7 @@ def handle_tool_response_in_history(
         if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
             # Convert tool message using plugin
             converted = tool_plugin.prepare_tool_response(
-                tool_call_id, tool_name, msg.get("content", ""), messages
+                tool_call_id, tool_name, (msg.get("content") or ""), messages
             )
             converted_messages.append(converted)
         else:
@@ -313,7 +313,7 @@ def get_session_for_messages(messages):
                             converted_msg = tool_plugin.prepare_tool_response(
                                 tool_call["id"],
                                 tool_call["function"]["name"],
-                                msg.get("content", ""),
+                                (msg.get("content") or ""),
                                 processed_messages,
                             )
                             converted.append(converted_msg)
@@ -331,7 +331,7 @@ def get_session_for_messages(messages):
             # For assistant messages, preserve tool_calls if they exist
             msg_copy = {
                 "role": role,
-                "content": msg.get("content", ""),
+                "content": (msg.get("content") or ""),
                 "original_role": role,
             }
             if role == "assistant" and "tool_calls" in msg:
@@ -605,7 +605,13 @@ def chat_completions():
         # Log each message in detail
         for idx, msg in enumerate(messages):
             role = msg.get("role")
-            content_preview = msg.get("content", "")[:100]
+            content = msg.get("content")
+            if content is None:
+                content_preview = (
+                    "[tool_calls: present]" if "tool_calls" in msg else "[null]"
+                )
+            else:
+                content_preview = content[:100]
             dbg(f"  Message {idx}: role={role}")
             if "tool_calls" in msg:
                 dbg(f"    tool_calls: {len(msg['tool_calls'])}")
@@ -689,7 +695,7 @@ def chat_completions():
             for msg in processed_messages:
                 role = msg.get("role")
                 if role in ("user", "assistant", "tool"):
-                    conv_item = {"role": role, "content": msg.get("content", "")}
+                    conv_item = {"role": role, "content": (msg.get("content") or "")}
                     if role == "assistant" and "tool_calls" in msg:
                         conv_item["tool_calls"] = msg["tool_calls"]
                     conversation_for_hash.append(conv_item)

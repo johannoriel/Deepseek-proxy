@@ -181,7 +181,7 @@ You may return the JSON directly, or wrapped in a markdown code block (```json .
         for i, msg in enumerate(messages):
             if msg.get("role") == "system":
                 plugin_dbg(f"Found system message at index {i}")
-                original_content = msg.get("content", "")
+                original_content = msg.get("content") or ""
                 plugin_dbg(f"Original system content: {original_content[:100]}...")
 
                 modified_messages.append(
