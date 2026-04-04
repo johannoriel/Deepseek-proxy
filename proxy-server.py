@@ -29,6 +29,7 @@ CORS(app)
 deepseek_api = None
 tool_plugin: ToolPlugin = None
 replace_system = False  # New global flag for system message replacement
+slowdown_seconds = 0  # Delay after each API call to avoid rate limits
 
 
 # Cache keyed by history_hash (hash of all turns EXCEPT the last user message).
@@ -1022,7 +1023,7 @@ Please continue with the task. Based on these results, what should be the next s
                 conversation_state,
             )
         else:
-            return handle_normal_response(
+            result = handle_normal_response(
                 deepseek_session_id,
                 prompt,
                 last_message_id,
@@ -1033,6 +1034,10 @@ Please continue with the task. Based on these results, what should be the next s
                 session_id,
                 conversation_state,
             )
+            if slowdown_seconds > 0:
+                dbg(f"Slowing down by {slowdown_seconds}s after API call")
+                time.sleep(slowdown_seconds)
+            return result
 
     except Exception as e:
         dbg(f"chat_completions: TOP-LEVEL EXCEPTION: {e}")
@@ -1412,6 +1417,9 @@ def handle_streaming_response(
             }
             yield f"data: {json.dumps(final_chunk)}\n\n"
             waiting.stop()
+            if slowdown_seconds > 0:
+                dbg(f"Slowing down by {slowdown_seconds}s after streaming API call")
+                time.sleep(slowdown_seconds)
             yield "data: [DONE]\n\n"
             dbg(
                 f"handle_streaming: done, {chunks_sent} chunks sent, message_id={message_id}"
@@ -1485,6 +1493,12 @@ def main():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, default=5000, help="Port to bind to")
     parser.add_argument("--debug", action="store_true", help="Run in debug mode")
+    parser.add_argument(
+        "--slowdown",
+        type=float,
+        default=0,
+        help="Wait this many seconds after each API call to avoid rate limits",
+    )
 
     # Tool plugin arguments
     parser.add_argument(
@@ -1517,9 +1531,10 @@ def main():
         print("  - DEEPSEEK_TOKEN in .env file")
         sys.exit(1)
 
-    global deepseek_api, replace_system
+    global deepseek_api, replace_system, slowdown_seconds
     deepseek_api = DeepSeekAPI(api_key)
     replace_system = args.replace_system  # Set the global flag
+    slowdown_seconds = args.slowdown  # Set the slowdown delay
 
     # Initialize tool plugin
     init_tool_plugin(args.tool_plugin, args.enable_tools)
@@ -1531,6 +1546,8 @@ def main():
     print(
         f"System message replacement: {'enabled' if args.replace_system else 'disabled'}"
     )
+    if args.slowdown > 0:
+        print(f"Slowdown: {args.slowdown}s after each API call")
     print("Endpoints:")
     print(f"  GET  /v1/models")
     print(f"  POST /v1/chat/completions")
