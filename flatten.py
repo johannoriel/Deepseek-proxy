@@ -83,10 +83,16 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
     collapsed = collapse_consecutive_roles(messages)
 
     sections: list[str] = []
+    tools_block = _format_available_tools(tools) if tools else None
+    tools_inserted = False
 
     for msg in collapsed:
         role = msg.get("role", "")
         content = _normalize_content(msg.get("content"))
+
+        if tools_block and not tools_inserted and role == "user":
+            sections.append(tools_block)
+            tools_inserted = True
 
         if role == "system":
             sections.append(f"[SYSTEM]\n{content}".rstrip())
@@ -105,7 +111,7 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
         else:
             sections.append(f"[{role.upper() or 'UNKNOWN'}]\n{content}".rstrip())
 
-    if tools:
-        sections.append(_format_available_tools(tools))
+    if tools_block and not tools_inserted:
+        sections.append(tools_block)
 
     return SEPARATOR.join(section for section in sections if section)

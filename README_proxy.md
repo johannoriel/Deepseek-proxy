@@ -42,6 +42,7 @@ history in the backend session.
 User-message blocks are rendered without a `[USER]` tag for cleaner backend-visible conversation text.
 If `tools` are unchanged from the previous turn in the same proxy session, tool definitions are not
 re-sent to the backend prompt (they are sent again only when changed).
+When tool definitions are included, `[AVAILABLE_TOOLS]` is placed before the first user turn in the flattened prompt.
 
 ## Run tests
 
