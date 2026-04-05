@@ -24,6 +24,13 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4) if text else 0
 
 
+def strip_finished_suffix(text: str) -> str:
+    stripped = (text or "").strip()
+    if stripped.endswith("FINISHED"):
+        return stripped[: -len("FINISHED")].rstrip()
+    return stripped
+
+
 def build_tool_call_response(tool_call_payload: dict[str, Any]) -> list[dict[str, Any]]:
     data = tool_call_payload.get("tool_call", {})
     name = data.get("name", "")
@@ -266,7 +273,8 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
 
             session_manager.update(client_session_id, backend_session_id, new_message_id)
 
-            parsed_tool = extract_tool_call(response_text or "")
+            normalized_response_text = strip_finished_suffix(response_text or "")
+            parsed_tool = extract_tool_call(normalized_response_text)
             response_id = f"chatcmpl-{uuid.uuid4().hex}"
 
             if parsed_tool:
@@ -287,7 +295,7 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
                     )
                 )
 
-            cleaned = clean_text_response(response_text or "")
+            cleaned = clean_text_response(normalized_response_text)
             if stream:
                 return Response(
                     stream_text_response(model, response_id, cleaned),

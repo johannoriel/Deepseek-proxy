@@ -65,6 +65,7 @@ pytest test_openai_compat.py -v --reuse-passed --pass-log .pytest_passed_tests.j
 ```
 
 Note: pass-state updates stop after the first failure in a run, so tests executed after a failing test are **not** marked as passed.
+If you change test logic and want a clean rerun, delete the pass log file first (e.g. `rm -f .pytest_passed_tests.json`).
 
 Name filter:
 

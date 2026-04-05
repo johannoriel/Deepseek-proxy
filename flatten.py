@@ -82,13 +82,9 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
     """Flatten OpenAI-style messages into a single prompt string for text-only backends."""
     collapsed = collapse_consecutive_roles(messages)
 
-    final_is_user = bool(collapsed and collapsed[-1].get("role") == "user")
-    current_request = collapsed[-1] if final_is_user else None
-    history = collapsed[:-1] if final_is_user else collapsed
-
     sections: list[str] = []
 
-    for msg in history:
+    for msg in collapsed:
         role = msg.get("role", "")
         content = _normalize_content(msg.get("content"))
 
@@ -111,12 +107,10 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
     if tools:
         sections.append(_format_available_tools(tools))
 
-    if current_request is not None:
-        current_content = _normalize_content(current_request.get("content"))
+    if collapsed and collapsed[-1].get("role") == "user":
         sections.append(
             "[CURRENT_USER_REQUEST]\n"
-            "This is the current user request to answer now:\n"
-            f"{current_content}"
+            "The final [USER] block above is the active request. Respond to it now."
         )
 
     return SEPARATOR.join(section for section in sections if section)
