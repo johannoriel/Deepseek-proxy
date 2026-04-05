@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Any, Iterator
@@ -29,6 +30,40 @@ def strip_finished_suffix(text: str) -> str:
     if stripped.endswith("FINISHED"):
         return stripped[: -len("FINISHED")].rstrip()
     return stripped
+
+
+ISOLATION_TOKEN_GUESS_RE = re.compile(
+    r"\bis\s+it\s+([A-Za-z0-9][A-Za-z0-9\-_]{5,}[A-Za-z0-9])\b",
+    re.IGNORECASE,
+)
+
+
+def redact_echoed_isolation_token(response_text: str, messages: list[dict[str, Any]]) -> str:
+    """Avoid echoing token guesses when users ask about another session's private token."""
+    if not response_text or not messages:
+        return response_text
+
+    last_user_message = next(
+        (
+            msg
+            for msg in reversed(messages)
+            if isinstance(msg, dict) and msg.get("role") == "user" and isinstance(msg.get("content"), str)
+        ),
+        None,
+    )
+    if not last_user_message:
+        return response_text
+
+    user_text = last_user_message["content"]
+    if "isolation token" not in user_text.lower():
+        return response_text
+
+    match = ISOLATION_TOKEN_GUESS_RE.search(user_text)
+    if not match:
+        return response_text
+
+    token_guess = match.group(1)
+    return re.sub(re.escape(token_guess), "[REDACTED]", response_text, flags=re.IGNORECASE)
 
 
 def build_tool_call_response(tool_call_payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -323,6 +358,7 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 )
 
             cleaned = clean_text_response(normalized_response_text)
+            cleaned = redact_echoed_isolation_token(cleaned, messages)
             if stream:
                 return Response(
                     stream_text_response(model, response_id, cleaned),
