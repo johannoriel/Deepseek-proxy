@@ -259,9 +259,12 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
             )
 
             if new_message_id is None:
-                new_message_id = str(uuid.uuid4())
+                logger.warning(
+                    "ron_api did not return message_id; reusing previous parent_message_id for session continuity"
+                )
+                new_message_id = parent_message_id
 
-            session_manager.update(client_session_id, backend_session_id, str(new_message_id))
+            session_manager.update(client_session_id, backend_session_id, new_message_id)
 
             parsed_tool = extract_tool_call(response_text or "")
             response_id = f"chatcmpl-{uuid.uuid4().hex}"

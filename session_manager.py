@@ -2,13 +2,13 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 
 @dataclass
 class SessionRecord:
     backend_session_id: str
-    last_message_id: str | None
+    last_message_id: Any | None
     updated_at: float
 
 
@@ -27,12 +27,12 @@ class SessionManager:
         for sid in expired:
             del self._sessions[sid]
 
-    def get_or_create(self, client_session_id: str | None, message_count: int) -> tuple[str, str | None]:
+    def get_or_create(self, client_session_id: str | None, message_count: int) -> tuple[str, Any | None]:
         with self._lock:
             self._cleanup_expired_locked()
 
             known = client_session_id and client_session_id in self._sessions
-            force_new = message_count == 1
+            force_new = message_count == 1 and not known
 
             if not client_session_id or not known or force_new:
                 backend_session_id = self._create_backend_session()
@@ -41,7 +41,7 @@ class SessionManager:
             record = self._sessions[client_session_id]
             return record.backend_session_id, record.last_message_id
 
-    def update(self, client_session_id: str, backend_session_id: str, last_message_id: str):
+    def update(self, client_session_id: str, backend_session_id: str, last_message_id: Any | None):
         with self._lock:
             self._sessions[client_session_id] = SessionRecord(
                 backend_session_id=backend_session_id,

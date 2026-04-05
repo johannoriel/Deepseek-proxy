@@ -57,6 +57,15 @@ Stop after numbered test:
 pytest test_openai_compat.py --stop-at 10 -v
 ```
 
+Reuse previously passed tests (skip reruns), and persist pass state:
+
+```bash
+pytest test_openai_compat.py -v --reuse-passed
+pytest test_openai_compat.py -v --reuse-passed --pass-log .pytest_passed_tests.json
+```
+
+Note: pass-state updates stop after the first failure in a run, so tests executed after a failing test are **not** marked as passed.
+
 Name filter:
 
 ```bash
