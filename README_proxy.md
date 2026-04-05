@@ -40,6 +40,8 @@ Implementation note: once a backend session is established, the proxy forwards o
 incremental turn (typically the final `user` or `tool` message) to avoid duplicating already-stored
 history in the backend session.
 User-message blocks are rendered without a `[USER]` tag for cleaner backend-visible conversation text.
+If `tools` are unchanged from the previous turn in the same proxy session, tool definitions are not
+re-sent to the backend prompt (they are sent again only when changed).
 
 ## Run tests
 

@@ -236,10 +236,23 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
             if not client_session_id:
                 client_session_id = session_manager.new_client_session_id()
 
+            previous_tools_signature = session_manager.get_last_tools_signature(client_session_id)
+            current_tools_signature = (
+                json.dumps(tools, ensure_ascii=False, sort_keys=True) if tools else None
+            )
+            effective_tools = tools
+            if (
+                parent_message_id is not None
+                and current_tools_signature
+                and current_tools_signature == previous_tools_signature
+            ):
+                # Avoid repeating the exact same tool catalog on every follow-up turn.
+                effective_tools = None
+
             # Keep backend history stable: after a session exists, send only the incremental turn
             # instead of re-flattening full OpenAI history every request.
             prompt_messages = messages if parent_message_id is None else [messages[-1]]
-            prompt_text = flatten_messages_to_prompt(prompt_messages, tools)
+            prompt_text = flatten_messages_to_prompt(prompt_messages, effective_tools)
             logger.info(
                 "ron_api.chat_completion session_id=%s parent_message_id=%s prompt_len=%s prompt_msgs=%s total_msgs=%s",
                 backend_session_id,
@@ -276,7 +289,12 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
                 )
                 new_message_id = parent_message_id
 
-            session_manager.update(client_session_id, backend_session_id, new_message_id)
+            session_manager.update(
+                client_session_id,
+                backend_session_id,
+                new_message_id,
+                last_tools_signature=current_tools_signature,
+            )
 
             normalized_response_text = strip_finished_suffix(response_text or "")
             parsed_tool = extract_tool_call(normalized_response_text)

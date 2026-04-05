@@ -9,6 +9,7 @@ from typing import Any, Callable
 class SessionRecord:
     backend_session_id: str
     last_message_id: Any | None
+    last_tools_signature: str | None
     updated_at: float
 
 
@@ -41,13 +42,30 @@ class SessionManager:
             record = self._sessions[client_session_id]
             return record.backend_session_id, record.last_message_id
 
-    def update(self, client_session_id: str, backend_session_id: str, last_message_id: Any | None):
+    def update(
+        self,
+        client_session_id: str,
+        backend_session_id: str,
+        last_message_id: Any | None,
+        last_tools_signature: str | None = None,
+    ):
         with self._lock:
+            previous = self._sessions.get(client_session_id)
             self._sessions[client_session_id] = SessionRecord(
                 backend_session_id=backend_session_id,
                 last_message_id=last_message_id,
+                last_tools_signature=last_tools_signature
+                if last_tools_signature is not None
+                else (previous.last_tools_signature if previous else None),
                 updated_at=time.time(),
             )
 
     def new_client_session_id(self) -> str:
         return str(uuid.uuid4())
+
+    def get_last_tools_signature(self, client_session_id: str | None) -> str | None:
+        if not client_session_id:
+            return None
+        with self._lock:
+            record = self._sessions.get(client_session_id)
+            return record.last_tools_signature if record else None
