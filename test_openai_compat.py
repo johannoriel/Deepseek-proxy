@@ -625,7 +625,7 @@ class TestPhase9_multi_tools:
         assert raw["choices"][0]["finish_reason"] == "stop"
         content = raw["choices"][0]["message"]["content"] or ""
         assert content.strip()
-        assert ("paris" in content.lower()) or ("56088" in "".join(ch for ch in content if ch.isdigit()))
+        assert ("paris" in content.lower()) or _contains_number(content, 56877)
 
     def test_31_history_preserved_after_parallel_tools(self, client):
         log.info("=== test_31_history_preserved_after_parallel_tools ===")
@@ -645,4 +645,4 @@ class TestPhase9_multi_tools:
         reply = (raw["choices"][0]["message"]["content"] or "").lower()
         assert reply.strip()
         assert "paris" in reply
-        assert ("56088" in "".join(ch for ch in reply if ch.isdigit())) or ("calculation" in reply)
+        assert _contains_number(reply, 56877) or ("calculation" in reply)

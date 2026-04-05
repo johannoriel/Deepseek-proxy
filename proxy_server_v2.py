@@ -371,6 +371,10 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 tool_calls = build_tool_call_response(parsed_tools)
                 cleaned = clean_text_response(normalized_response_text)
                 cleaned = redact_echoed_isolation_token(cleaned, messages)
+                cleaned_candidate = (cleaned or "").strip()
+                if cleaned_candidate and extract_tool_calls(cleaned_candidate):
+                    # If residual content is still a tool-call payload, suppress it to avoid duplicate serialization.
+                    cleaned = ""
                 if stream:
                     return Response(
                         stream_tool_response(model, response_id, tool_calls, cleaned),

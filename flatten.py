@@ -39,7 +39,7 @@ def _normalize_content(content: Any) -> str:
 
 
 def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
-    lines = []
+    items: list[dict[str, Any]] = []
     for tc in tool_calls:
         function = tc.get("function", {}) if isinstance(tc, dict) else {}
         name = function.get("name", "")
@@ -49,16 +49,8 @@ def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
                 arguments = json.loads(arguments)
             except Exception:
                 pass
-        lines.append(
-            json.dumps(
-                {
-                    "name": name,
-                    "arguments": arguments,
-                },
-                ensure_ascii=False,
-            )
-        )
-    return "\n".join(lines)
+        items.append({"name": name, "arguments": arguments})
+    return json.dumps({"tool_calls": items}, ensure_ascii=False)
 
 
 def _format_available_tools(tools: list[dict[str, Any]]) -> str:
@@ -105,11 +97,12 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
             # Keep user turns clean for backend-visible transcript readability.
             sections.append(content.rstrip())
         elif role == "assistant":
-            block = [f"[ASSISTANT]\n{content}".rstrip()]
+            body_parts: list[str] = []
+            if content:
+                body_parts.append(content.rstrip())
             if msg.get("tool_calls"):
-                block.append("[TOOL_CALLS]")
-                block.append(_format_tool_calls(msg["tool_calls"]))
-            sections.append("\n".join(part for part in block if part).rstrip())
+                body_parts.append(_format_tool_calls(msg["tool_calls"]))
+            sections.append(f"[ASSISTANT]\n" + "\n".join(body_parts).rstrip())
         elif role == "tool":
             tc_id = msg.get("tool_call_id", "")
             sections.append(f"[TOOL_RESULT id={tc_id}]\n{content}".rstrip())
