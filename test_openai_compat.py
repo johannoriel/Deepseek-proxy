@@ -408,7 +408,8 @@ class TestPhase6_Streaming:
         assembled = "".join((c.choices[0].delta.content or "") for c in chunks if c.choices)
         final_reason = [c.choices[0].finish_reason for c in chunks if c.choices and c.choices[0].finish_reason]
         log.info("chunk_count=%s assembled=%s", len(chunks), assembled)
-        assert len(chunks) >= 3
+        # One content chunk + one terminal chunk is valid for short outputs.
+        assert len(chunks) >= 2
         assert assembled.strip()
         assert final_reason[-1] == "stop"
 
