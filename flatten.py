@@ -107,10 +107,4 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
     if tools:
         sections.append(_format_available_tools(tools))
 
-    if collapsed and collapsed[-1].get("role") == "user":
-        sections.append(
-            "[CURRENT_USER_REQUEST]\n"
-            "The final [USER] block above is the active request. Respond to it now."
-        )
-
     return SEPARATOR.join(section for section in sections if section)
