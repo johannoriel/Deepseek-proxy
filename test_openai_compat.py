@@ -243,8 +243,8 @@ def _ensure_phase9_state(client: OpenAI, include_tool_results: bool = False) -> 
             {
                 "role": "system",
                 "content": (
-                    "You are a tool-using assistant. When a question clearly needs multiple tools, "
-                    "emit all required tool calls in one response."
+                    "You are a tool-using assistant. For the next user query, you MUST call exactly two tools in one "
+                    "assistant response: get_weather and calculate. Return them together via tool_calls."
                 ),
             },
             {
@@ -254,6 +254,10 @@ def _ensure_phase9_state(client: OpenAI, include_tool_results: bool = False) -> 
         ]
         raw = _dump(_chat(client, messages=messages, tools=TOOLS))
         tool_calls = raw["choices"][0]["message"].get("tool_calls") or []
+        if len(tool_calls) != 2:
+            raise AssertionError(
+                f"Expected exactly 2 tool calls in phase9 setup, got {len(tool_calls)}: {json.dumps(raw, ensure_ascii=False)}"
+            )
         session_state["phase9_session"] = raw["session_id"]
         session_state["phase9_initial_raw"] = raw
         session_state["phase9_messages"] = messages + [
@@ -609,10 +613,9 @@ class TestPhase9_multi_tools:
         tool_calls = message.get("tool_calls") or []
         log.info("PHASE9_INITIAL: %s", json.dumps(raw, ensure_ascii=False, indent=2))
         assert raw["choices"][0]["finish_reason"] == "tool_calls"
-        assert len(tool_calls) >= 2
+        assert len(tool_calls) == 2
         names = {tc["function"]["name"] for tc in tool_calls}
-        assert "get_weather" in names
-        assert "calculate" in names
+        assert names == {"get_weather", "calculate"}
 
     def test_30_continue_after_multiple_tool_results(self, client):
         log.info("=== test_30_continue_after_multiple_tool_results ===")
@@ -629,9 +632,17 @@ class TestPhase9_multi_tools:
         _ensure_phase9_state(client, include_tool_results=True)
         sid = session_state["phase9_session"]
         msgs = session_state["phase9_messages"]
-        msgs.append({"role": "user", "content": "What two tasks did you just complete?"})
+        msgs.append(
+            {
+                "role": "user",
+                "content": "What two tasks did you just complete? Mention both the Paris weather lookup and the math computation.",
+            }
+        )
         raw = _dump(_chat(client, messages=msgs, tools=TOOLS, session_id=sid))
         msgs.append({"role": "assistant", "content": raw["choices"][0]["message"]["content"]})
         log.info("PHASE9_MEMORY_CHECK: %s", json.dumps(raw, ensure_ascii=False, indent=2))
-        assert raw["choices"][0]["finish_reason"] in ["stop", "tool_calls"]
-        assert (raw["choices"][0]["message"]["content"] or "").strip()
+        assert raw["choices"][0]["finish_reason"] == "stop"
+        reply = (raw["choices"][0]["message"]["content"] or "").lower()
+        assert reply.strip()
+        assert "paris" in reply
+        assert ("56088" in "".join(ch for ch in reply if ch.isdigit())) or ("calculation" in reply)

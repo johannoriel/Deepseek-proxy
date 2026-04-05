@@ -11,7 +11,12 @@ def collapse_consecutive_roles(messages: list[dict[str, Any]]) -> list[dict[str,
     collapsed: list[dict[str, Any]] = []
     for msg in messages:
         current = deepcopy(msg)
-        if collapsed and collapsed[-1].get("role") == current.get("role"):
+        should_merge = bool(collapsed and collapsed[-1].get("role") == current.get("role"))
+        if should_merge and current.get("role") == "tool":
+            # Never merge tool responses: each tool_call_id must remain distinct.
+            should_merge = False
+
+        if should_merge:
             prev = collapsed[-1]
             prev_content = prev.get("content") or ""
             new_content = current.get("content") or ""

@@ -282,7 +282,7 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
             if not isinstance(messages, list) or not messages:
                 return jsonify({"error": {"message": "messages must be a non-empty list", "type": "invalid_request_error", "code": 400}}), 400
 
-            backend_session_id, parent_message_id = session_manager.get_or_create(
+            backend_session_id, parent_message_id, last_message_count = session_manager.get_or_create(
                 client_session_id, len(messages)
             )
             if not client_session_id:
@@ -301,9 +301,13 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 # Avoid repeating the exact same tool catalog on every follow-up turn.
                 effective_tools = None
 
-            # Keep backend history stable: after a session exists, send only the incremental turn
-            # instead of re-flattening full OpenAI history every request.
-            prompt_messages = messages if parent_message_id is None else [messages[-1]]
+            # Keep backend history stable: after a session exists, send only unseen incremental turns.
+            if parent_message_id is None:
+                prompt_messages = messages
+            elif 0 <= last_message_count < len(messages):
+                prompt_messages = messages[last_message_count:]
+            else:
+                prompt_messages = [messages[-1]]
             prompt_text = flatten_messages_to_prompt(prompt_messages, effective_tools)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Flattened prompt text:\n%s", prompt_text)
@@ -356,6 +360,7 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 backend_session_id,
                 new_message_id,
                 last_tools_signature=current_tools_signature,
+                last_message_count=len(messages),
             )
 
             normalized_response_text = strip_finished_suffix(response_text or "")

@@ -10,6 +10,7 @@ class SessionRecord:
     backend_session_id: str
     last_message_id: Any | None
     last_tools_signature: str | None
+    last_message_count: int
     updated_at: float
 
 
@@ -28,7 +29,7 @@ class SessionManager:
         for sid in expired:
             del self._sessions[sid]
 
-    def get_or_create(self, client_session_id: str | None, message_count: int) -> tuple[str, Any | None]:
+    def get_or_create(self, client_session_id: str | None, message_count: int) -> tuple[str, Any | None, int]:
         with self._lock:
             self._cleanup_expired_locked()
 
@@ -37,10 +38,10 @@ class SessionManager:
 
             if not client_session_id or not known or force_new:
                 backend_session_id = self._create_backend_session()
-                return backend_session_id, None
+                return backend_session_id, None, 0
 
             record = self._sessions[client_session_id]
-            return record.backend_session_id, record.last_message_id
+            return record.backend_session_id, record.last_message_id, record.last_message_count
 
     def update(
         self,
@@ -48,6 +49,7 @@ class SessionManager:
         backend_session_id: str,
         last_message_id: Any | None,
         last_tools_signature: str | None = None,
+        last_message_count: int | None = None,
     ):
         with self._lock:
             previous = self._sessions.get(client_session_id)
@@ -57,6 +59,9 @@ class SessionManager:
                 last_tools_signature=last_tools_signature
                 if last_tools_signature is not None
                 else (previous.last_tools_signature if previous else None),
+                last_message_count=last_message_count
+                if last_message_count is not None
+                else (previous.last_message_count if previous else 0),
                 updated_at=time.time(),
             )
 
