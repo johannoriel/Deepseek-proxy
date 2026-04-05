@@ -102,6 +102,11 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
                 body_parts.append(content.rstrip())
             if msg.get("tool_calls"):
                 body_parts.append(_format_tool_calls(msg["tool_calls"]))
+                if not content:
+                    # For assistant tool-call handoff messages, keep raw JSON only (no assistant tag)
+                    # so downstream text backends don't reinterpret this as a fresh user-style instruction.
+                    sections.append(body_parts[-1])
+                    continue
             sections.append(f"[ASSISTANT]\n" + "\n".join(body_parts).rstrip())
         elif role == "tool":
             tc_id = msg.get("tool_call_id", "")
