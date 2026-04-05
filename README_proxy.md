@@ -39,6 +39,7 @@ Custom request field:
 Implementation note: once a backend session is established, the proxy forwards only the latest
 incremental turn (typically the final `user` or `tool` message) to avoid duplicating already-stored
 history in the backend session.
+User-message blocks are rendered without a `[USER]` tag for cleaner backend-visible conversation text.
 
 ## Run tests
 

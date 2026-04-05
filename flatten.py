@@ -91,7 +91,8 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
         if role == "system":
             sections.append(f"[SYSTEM]\n{content}".rstrip())
         elif role == "user":
-            sections.append(f"[USER]\n{content}".rstrip())
+            # Keep user turns clean for backend-visible transcript readability.
+            sections.append(content.rstrip())
         elif role == "assistant":
             block = [f"[ASSISTANT]\n{content}".rstrip()]
             if msg.get("tool_calls"):
