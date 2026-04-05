@@ -12,6 +12,7 @@
 
 - Python deps in `requirements.txt`
 - Valid DeepSeek token (`DEEPSEEK_TOKEN`) or `--api-key`
+- Optional `.env` file in project root containing `DEEPSEEK_TOKEN=...`
 
 ## Run server
 
@@ -22,7 +23,7 @@ python proxy_server_v2.py --api-key "$DEEPSEEK_TOKEN" --port 5005
 Optional flags:
 
 ```bash
-python proxy_server_v2.py --host 0.0.0.0 --port 5005 --debug
+python proxy_server_v2.py --host 0.0.0.0 --port 5005 --debug --slowdown 1.5
 ```
 
 ## API endpoints

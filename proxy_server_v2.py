@@ -8,6 +8,7 @@ from typing import Any, Iterator
 
 from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
+from dotenv import load_dotenv
 
 from flatten import flatten_messages_to_prompt
 from ron.api import DeepSeekAPI
@@ -16,6 +17,7 @@ from tool_parser import clean_text_response, extract_tool_call
 
 
 logger = logging.getLogger("proxy_server_v2")
+slowdown_seconds = 0.0
 
 
 def estimate_tokens(text: str) -> int:
@@ -239,6 +241,9 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
                 prompt_text,
                 parent_message_id=parent_message_id,
             )
+            if slowdown_seconds > 0:
+                logger.info("Applying slowdown of %ss after API call", slowdown_seconds)
+                time.sleep(slowdown_seconds)
 
             if isinstance(ron_response, tuple):
                 response_text, new_message_id = ron_response
@@ -299,17 +304,22 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
 
         except Exception as exc:
             logger.exception("chat_completions failed")
+            status_code = 500
+            if getattr(exc, "status_code", None) == 429:
+                status_code = 429
+            elif "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower():
+                status_code = 429
             return (
                 jsonify(
                     {
                         "error": {
                             "message": str(exc),
                             "type": "api_error",
-                            "code": 500,
+                            "code": status_code,
                         }
                     }
                 ),
-                500,
+                status_code,
             )
 
     return app
@@ -321,11 +331,21 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=5005)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--slowdown",
+        type=float,
+        default=0.0,
+        help="Wait this many seconds after each API call to reduce rate-limit pressure",
+    )
     args = parser.parse_args()
 
+    load_dotenv()
     api_key = args.api_key or os.getenv("DEEPSEEK_TOKEN")
     if not api_key:
         raise SystemExit("Missing API key. Pass --api-key or set DEEPSEEK_TOKEN")
+
+    global slowdown_seconds
+    slowdown_seconds = args.slowdown
 
     app = create_app(api_key=api_key, debug=args.debug)
     app.run(host=args.host, port=args.port, debug=args.debug)
