@@ -92,32 +92,34 @@ def log_conversation_composition(conversation_state, label="Conversation"):
     dbg(f"{'=' * 60}")
 
     for idx, msg in enumerate(conv):
+        orig_role = msg.get("original_role", msg.get("role"))
         role = msg.get("role")
         details = []
 
-        if role == "assistant":
+        if orig_role == "assistant":
             if "tool_calls" in msg:
                 details.append(f"tool_calls={len(msg['tool_calls'])}")
             content_len = len((msg.get("content") or ""))
             details.append(f"content_len={content_len}")
 
-        elif role == "user":
+        elif orig_role == "user":
             content_len = len((msg.get("content") or ""))
             details.append(f"content_len={content_len}")
 
-        elif role == "tool":
+        elif orig_role == "tool":
             tool_call_id = msg.get("tool_call_id", "unknown")
             content_len = len((msg.get("content") or ""))
             details.append(
                 f"tool_call_id={tool_call_id[:20]}..., content_len={content_len}"
             )
 
-        elif role == "system":
+        elif orig_role == "system":
             content_len = len((msg.get("content") or ""))
             details.append(f"content_len={content_len}")
 
         detail_str = f" [{', '.join(details)}]" if details else ""
-        dbg(f"  [{idx:2d}] {role:10}{detail_str}")
+        role_display = f"{orig_role}->{role}" if orig_role != role else orig_role
+        dbg(f"  [{idx:2d}] {role_display:16}{detail_str}")
 
     dbg(f"{'=' * 60}\n")
 
@@ -231,26 +233,49 @@ def history_hash(conversation_without_last):
 
 def replace_system_messages(messages: List[Dict]) -> List[Dict]:
     """
-    Replace all system messages with user messages.
-    This is done transparently for the caller.
+    Convert all messages to roles supported by the DeepSeek API (user/assistant only).
+    - system → user
+    - tool → assistant
+    - user → user (unchanged)
+    - assistant → assistant (unchanged)
+    Each message gets an original_role field for downstream logic.
+    Consecutive same-role messages are compacted into one to avoid DeepSeek
+    treating them as re-edits.
     """
     if not replace_system:
         return messages
 
-    modified_messages = []
+    converted = []
     for msg in messages:
-        if msg.get("role") == "system":
-            # Convert system message to user message
-            modified_msg = msg.copy()
-            modified_msg["role"] = "user"
-            modified_messages.append(modified_msg)
-            dbg(
-                f"Replaced system message with user message: {msg.get('content', '')[:50]}..."
-            )
-        else:
-            modified_messages.append(msg)
+        role = msg.get("role")
+        modified_msg = msg.copy()
+        modified_msg["original_role"] = role
 
-    return modified_messages
+        if role == "system":
+            modified_msg["role"] = "user"
+        elif role == "tool":
+            modified_msg["role"] = "assistant"
+
+        converted.append(modified_msg)
+
+    compacted = []
+    for msg in converted:
+        if compacted and compacted[-1]["role"] == msg["role"]:
+            existing = compacted[-1]
+            existing_content = existing.get("content") or ""
+            new_content = msg.get("content") or ""
+            if new_content:
+                existing["content"] = existing_content + "\n\n" + new_content
+            if "tool_calls" in msg:
+                if "tool_calls" not in existing:
+                    existing["tool_calls"] = []
+                existing["tool_calls"].extend(msg["tool_calls"])
+            if "tool_call_id" in msg:
+                existing["tool_call_id"] = msg["tool_call_id"]
+        else:
+            compacted.append(msg)
+
+    return compacted
 
 
 @app.route("/v1/models", methods=["GET"])
@@ -296,13 +321,15 @@ def get_session_for_messages(messages):
 
     # Handle tool responses if we're in a tool conversation
     if tool_plugin and tool_plugin.enabled:
-        # Check if we have tool messages that need conversion
-        has_tool_msgs = any(msg.get("role") == "tool" for msg in processed_messages)
+        # Check if we have tool messages that need conversion (check original_role)
+        has_tool_msgs = any(
+            msg.get("original_role") == "tool" for msg in processed_messages
+        )
         if has_tool_msgs and isinstance(tool_plugin, SimulatedToolPlugin):
             # Convert tool messages
             converted = []
             for i, msg in enumerate(processed_messages):
-                if msg.get("role") == "tool":
+                if msg.get("original_role") == "tool":
                     # Find the corresponding assistant message with tool_calls
                     for j in range(i - 1, -1, -1):
                         if processed_messages[j].get(
@@ -328,18 +355,19 @@ def get_session_for_messages(messages):
 
     for msg in processed_messages:
         role = msg.get("role")
-        if role in ("user", "assistant", "system", "tool"):
+        orig_role = msg.get("original_role", role)
+        if role in ("user", "assistant"):
             # For assistant messages, preserve tool_calls if they exist
             msg_copy = {
                 "role": role,
                 "content": (msg.get("content") or ""),
-                "original_role": role,
+                "original_role": orig_role,
             }
             if role == "assistant" and "tool_calls" in msg:
                 msg_copy["tool_calls"] = msg["tool_calls"]
 
             conversation.append(msg_copy)
-            original_roles.append(role)
+            original_roles.append(orig_role)
 
     # Extract tools if present
     tools = None
@@ -395,9 +423,11 @@ def get_session_for_messages(messages):
         # - Assistant messages (always, with their tool_calls if present)
         # - Original system messages (even if they were converted, they were part of the context)
         # - Original user messages (but only if they're not the last one)
+        # - Original tool messages (converted to assistant, include them)
         if (
             msg["role"] == "assistant"
             or original_role == "system"
+            or original_role == "tool"
             or (original_role == "user" and i < last_user_index)
         ):
             history_msg = {"role": msg["role"], "content": msg["content"]}
@@ -497,12 +527,6 @@ def get_session_for_messages(messages):
                 dbg(f"get_session: skipping assistant turn [{i + 1}]")
                 i += 2
                 continue
-            elif i + 1 < len(history) and history[i + 1]["role"] == "tool":
-                dbg(
-                    f"get_session: tool response follows, will handle in next iteration"
-                )
-                i += 1
-                continue
             else:
                 i += 1
         elif role == "assistant":
@@ -510,11 +534,6 @@ def get_session_for_messages(messages):
             # as responses to user messages. If we encounter one without a preceding user,
             # skip it.
             dbg(f"get_session: skipping standalone assistant message at [{i}]")
-            i += 1
-            continue
-        elif role == "tool":
-            # Handle tool messages - they should be sent as part of the next user message
-            dbg(f"get_session: skipping tool message at [{i}]")
             i += 1
             continue
         else:
@@ -668,7 +687,7 @@ def chat_completions():
             # Check if conversation is growing
             prev_len = len(conversation_state.get("conversation", []))
             new_messages_count = len(
-                [m for m in processed_messages if m.get("role") != "system"]
+                [m for m in processed_messages if m.get("original_role") != "system"]
             )
 
             dbg(f"  Previous conversation length: {prev_len}")
@@ -676,8 +695,8 @@ def chat_completions():
 
             # Add the new messages to the stored conversation
             for msg in processed_messages:
-                # Only add non-system messages to conversation
-                if msg.get("role") != "system":
+                # Only add non-system messages to conversation (check original_role)
+                if msg.get("original_role") != "system":
                     conversation_state["conversation"].append(msg)
 
             log_conversation_composition(
@@ -703,7 +722,7 @@ def chat_completions():
             conversation_for_hash = []
             for msg in processed_messages:
                 role = msg.get("role")
-                if role in ("user", "assistant", "tool"):
+                if role in ("user", "assistant"):
                     conv_item = {"role": role, "content": (msg.get("content") or "")}
                     if role == "assistant" and "tool_calls" in msg:
                         conv_item["tool_calls"] = msg["tool_calls"]
@@ -890,15 +909,23 @@ def chat_completions():
                     dbg(f"Cached session with hash {history_hash_key[:16]}...")
 
         # Now handle the current message
-        # Get the latest user message
+        # Get the latest user message (check original_role to skip converted system messages)
         latest_user_message = None
         latest_user_index = None
 
         for i in range(len(processed_messages) - 1, -1, -1):
-            if processed_messages[i].get("role") == "user":
+            if processed_messages[i].get("original_role") == "user":
                 latest_user_message = processed_messages[i].get("content", "")
                 latest_user_index = i
                 break
+
+        # Fallback: if no original user found, try by converted role
+        if not latest_user_message:
+            for i in range(len(processed_messages) - 1, -1, -1):
+                if processed_messages[i].get("role") == "user":
+                    latest_user_message = processed_messages[i].get("content", "")
+                    latest_user_index = i
+                    break
 
         if not latest_user_message:
             return jsonify({"error": "No user message found"}), 400
@@ -932,7 +959,7 @@ def chat_completions():
                     # Check if there are tool responses after this assistant message
                     tool_responses = []
                     for i in range(last_assistant_index + 1, len(conv_messages)):
-                        if conv_messages[i].get("role") == "tool":
+                        if conv_messages[i].get("original_role") == "tool":
                             tool_responses.append(conv_messages[i])
 
                     dbg(f"  Found {len(last_assistant['tool_calls'])} tool calls")
@@ -957,7 +984,7 @@ def chat_completions():
             # Collect tool responses from conversation state
             tool_responses = []
             for msg in conversation_state["conversation"]:
-                if msg.get("role") == "tool":
+                if msg.get("original_role") == "tool":
                     tool_responses.append(msg)
 
             dbg(f"Found {len(tool_responses)} tool responses in conversation state")
