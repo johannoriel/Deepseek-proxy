@@ -263,7 +263,7 @@ def _ensure_phase9_state(client: OpenAI, include_tool_results: bool = False) -> 
         session_state["phase9_messages"] = messages + [
             {
                 "role": "assistant",
-                "content": raw["choices"][0]["message"].get("content"),
+                "content": None,
                 "tool_calls": tool_calls,
             }
         ]

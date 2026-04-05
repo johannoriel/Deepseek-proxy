@@ -375,6 +375,9 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 if cleaned_candidate and extract_tool_calls(cleaned_candidate):
                     # If residual content is still a tool-call payload, suppress it to avoid duplicate serialization.
                     cleaned = ""
+                cleaned_for_message = cleaned.strip() if isinstance(cleaned, str) else ""
+                if not cleaned_for_message:
+                    cleaned = None
                 if stream:
                     return Response(
                         stream_tool_response(model, response_id, tool_calls, cleaned),
@@ -384,7 +387,7 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                     build_completion_response(
                         model=model,
                         session_id=client_session_id,
-                        content=cleaned or None,
+                        content=cleaned,
                         tool_calls=tool_calls,
                         finish_reason="tool_calls",
                         prompt_text=prompt_text,
