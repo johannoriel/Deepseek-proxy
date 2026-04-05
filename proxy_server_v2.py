@@ -236,12 +236,17 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
             if not client_session_id:
                 client_session_id = session_manager.new_client_session_id()
 
-            prompt_text = flatten_messages_to_prompt(messages, tools)
+            # Keep backend history stable: after a session exists, send only the incremental turn
+            # instead of re-flattening full OpenAI history every request.
+            prompt_messages = messages if parent_message_id is None else [messages[-1]]
+            prompt_text = flatten_messages_to_prompt(prompt_messages, tools)
             logger.info(
-                "ron_api.chat_completion session_id=%s parent_message_id=%s prompt_len=%s",
+                "ron_api.chat_completion session_id=%s parent_message_id=%s prompt_len=%s prompt_msgs=%s total_msgs=%s",
                 backend_session_id,
                 parent_message_id,
                 len(prompt_text),
+                len(prompt_messages),
+                len(messages),
             )
             ron_response = ron_api.chat_completion(
                 backend_session_id,

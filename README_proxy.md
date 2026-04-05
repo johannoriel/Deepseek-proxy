@@ -36,6 +36,10 @@ Custom request field:
 
 - `session_id` (optional): client-managed session ID returned by this proxy.
 
+Implementation note: once a backend session is established, the proxy forwards only the latest
+incremental turn (typically the final `user` or `tool` message) to avoid duplicating already-stored
+history in the backend session.
+
 ## Run tests
 
 Run all:
