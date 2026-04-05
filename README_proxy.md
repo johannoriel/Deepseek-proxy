@@ -23,8 +23,11 @@ python proxy_server_v2.py --api-key "$DEEPSEEK_TOKEN" --port 5005
 Optional flags:
 
 ```bash
-python proxy_server_v2.py --host 0.0.0.0 --port 5005 --debug --slowdown 1.5
+python proxy_server_v2.py --host 0.0.0.0 --port 5005 --verbose --debug --slowdown 1.5
 ```
+
+- `--verbose`: health/info-level runtime logs (session IDs, prompt lengths, etc.)
+- `--debug`: very detailed logs including incoming payloads, flattened prompt text, and raw backend response text
 
 ## API endpoints
 

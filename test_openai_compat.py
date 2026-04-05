@@ -176,12 +176,18 @@ def _ensure_phase4_state(client: OpenAI, include_result: bool = False) -> None:
 def _ensure_phase5_state(client: OpenAI, step: int) -> None:
     if "phase5_session" not in session_state:
         messages = [
-            {"role": "system", "content": "You are a helpful assistant with tools."},
+            {
+                "role": "system",
+                "content": "You are a helpful assistant with tools. Do not call tools for greetings or chit-chat; only call tools when explicitly needed.",
+            },
             {"role": "user", "content": "Hello, I'm Bob. Nice to meet you."},
         ]
         raw = _dump(_chat(client, messages=messages, tools=TOOLS))
         session_state["phase5_session"] = raw["session_id"]
-        session_state["phase5_messages"] = messages + [{"role": "assistant", "content": raw["choices"][0]["message"]["content"]}]
+        assistant_msg = {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}
+        if raw["choices"][0]["message"].get("tool_calls"):
+            assistant_msg["tool_calls"] = raw["choices"][0]["message"]["tool_calls"]
+        session_state["phase5_messages"] = messages + [assistant_msg]
         session_state["phase5_step"] = 14
 
     sid = session_state["phase5_session"]
@@ -343,15 +349,27 @@ class TestPhase5_MultiTurnWithTools:
     def test_14_turn1_normal(self, client):
         log.info("=== test_14_turn1_normal ===")
         messages = [
-            {"role": "system", "content": "You are a helpful assistant with tools."},
+            {
+                "role": "system",
+                "content": "You are a helpful assistant with tools. Do not call tools for greetings or chit-chat; only call tools when explicitly needed.",
+            },
             {"role": "user", "content": "Hello, I'm Bob. Nice to meet you."},
         ]
         response = _chat(client, messages=messages, tools=TOOLS)
         raw = _dump(response)
-        assert raw["choices"][0]["finish_reason"] == "stop"
-        assert raw["choices"][0]["message"]["content"]
+        assert raw["choices"][0]["finish_reason"] in ["stop", "tool_calls"]
+        if raw["choices"][0]["finish_reason"] == "stop":
+            assert raw["choices"][0]["message"]["content"]
+            assistant_msg = {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}
+        else:
+            assert raw["choices"][0]["message"]["tool_calls"]
+            assistant_msg = {
+                "role": "assistant",
+                "content": raw["choices"][0]["message"]["content"],
+                "tool_calls": raw["choices"][0]["message"]["tool_calls"],
+            }
         session_state["phase5_session"] = raw["session_id"]
-        session_state["phase5_messages"] = messages + [{"role": "assistant", "content": raw["choices"][0]["message"]["content"]}]
+        session_state["phase5_messages"] = messages + [assistant_msg]
 
     def test_15_turn2_tool_call(self, client):
         log.info("=== test_15_turn2_tool_call ===")

@@ -184,14 +184,12 @@ def stream_tool_response(model: str, response_id: str, tool_call: dict[str, Any]
     yield sse_line("[DONE]")
 
 
-def create_app(api_key: str, debug: bool = False) -> Flask:
+def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flask:
     app = Flask(__name__)
     CORS(app)
 
-    logging.basicConfig(
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    log_level = logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
+    logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     ron_api = DeepSeekAPI(api_key)
     session_manager = SessionManager(create_backend_session=ron_api.create_chat_session)
@@ -221,6 +219,8 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
     def chat_completions() -> Any:
         try:
             payload = request.get_json(force=True, silent=False) or {}
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Incoming payload: %s", json.dumps(payload, ensure_ascii=False))
             messages = payload.get("messages", [])
             tools = payload.get("tools")
             stream = bool(payload.get("stream", False))
@@ -253,6 +253,8 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
             # instead of re-flattening full OpenAI history every request.
             prompt_messages = messages if parent_message_id is None else [messages[-1]]
             prompt_text = flatten_messages_to_prompt(prompt_messages, effective_tools)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Flattened prompt text:\n%s", prompt_text)
             logger.info(
                 "ron_api.chat_completion session_id=%s parent_message_id=%s prompt_len=%s prompt_msgs=%s total_msgs=%s",
                 backend_session_id,
@@ -275,6 +277,8 @@ def create_app(api_key: str, debug: bool = False) -> Flask:
             else:
                 response_text = ron_response.get("content", "")
                 new_message_id = ron_response.get("message_id")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Raw backend response text:\n%s", response_text)
 
             logger.info(
                 "ron_api response session_id=%s response_len=%s message_id=%s",
@@ -365,6 +369,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=5005)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--verbose", action="store_true", help="Enable informational runtime logs")
     parser.add_argument(
         "--slowdown",
         type=float,
@@ -381,7 +386,7 @@ def main() -> None:
     global slowdown_seconds
     slowdown_seconds = args.slowdown
 
-    app = create_app(api_key=api_key, debug=args.debug)
+    app = create_app(api_key=api_key, debug=args.debug, verbose=args.verbose)
     app.run(host=args.host, port=args.port, debug=args.debug)
 
 
