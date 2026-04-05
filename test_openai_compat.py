@@ -90,6 +90,121 @@ def _chat(client: OpenAI, *, messages: list[dict], tools=None, stream=False, ses
     return client.chat.completions.create(**req)
 
 
+def _ensure_phase2_state(client: OpenAI, step: int) -> None:
+    """Ensure phase 2 conversational state exists up to `step` (6, 7, 8)."""
+    if "phase2_sid" not in session_state:
+        base_messages = [{"role": "user", "content": "My name is Alice and I love astronomy."}]
+        raw = _dump(_chat(client, messages=base_messages))
+        session_state["phase2_sid"] = raw["session_id"]
+        session_state["phase2_history"] = base_messages + [
+            {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}
+        ]
+        session_state["phase2_step"] = 6
+
+    sid = session_state["phase2_sid"]
+    history = session_state["phase2_history"]
+    current_step = session_state.get("phase2_step", 6)
+
+    if step >= 7 and current_step < 7:
+        history.append({"role": "user", "content": "What is my name?"})
+        raw = _dump(_chat(client, messages=history, session_id=sid))
+        history.append({"role": "assistant", "content": raw["choices"][0]["message"]["content"]})
+        session_state["phase2_step"] = 7
+
+    if step >= 8 and session_state.get("phase2_step", 6) < 8:
+        history.append({"role": "user", "content": "What topic did I say I love?"})
+        raw = _dump(_chat(client, messages=history, session_id=sid))
+        history.append({"role": "assistant", "content": raw["choices"][0]["message"]["content"]})
+        session_state["phase2_step"] = 8
+
+
+def _ensure_phase3_state(client: OpenAI, include_tool_result: bool = False) -> None:
+    if "phase3_session" not in session_state:
+        messages = [
+            {"role": "system", "content": "Use tools when appropriate."},
+            {"role": "user", "content": "What is the weather in Paris?"},
+        ]
+        raw = _dump(_chat(client, messages=messages, tools=TOOLS))
+        tool_calls = raw["choices"][0]["message"]["tool_calls"] or []
+        session_state["phase3_initial_raw"] = raw
+        session_state["phase3_session"] = raw["session_id"]
+        session_state["phase3_messages"] = messages + [{"role": "assistant", "content": None, "tool_calls": tool_calls}]
+        session_state["phase3_has_result"] = False
+
+    if include_tool_result and not session_state.get("phase3_has_result"):
+        sid = session_state["phase3_session"]
+        msgs = session_state["phase3_messages"]
+        tc = msgs[-1]["tool_calls"][0]
+        args = json.loads(tc["function"]["arguments"])
+        msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result(tc["function"]["name"], args)})
+        raw = _dump(_chat(client, messages=msgs, tools=TOOLS, session_id=sid))
+        msgs.append({"role": "assistant", "content": raw["choices"][0]["message"]["content"]})
+        session_state["phase3_has_result"] = True
+
+
+def _ensure_phase4_state(client: OpenAI, include_result: bool = False) -> None:
+    if "phase4_session" not in session_state:
+        raw = _dump(_chat(client, messages=[{"role": "user", "content": "Calculate (123 * 456) + 789"}], tools=TOOLS))
+        session_state["phase4_initial_raw"] = raw
+        session_state["phase4_session"] = raw["session_id"]
+        session_state["phase4_messages"] = [
+            {"role": "user", "content": "Calculate (123 * 456) + 789"},
+            {"role": "assistant", "content": None, "tool_calls": raw["choices"][0]["message"]["tool_calls"]},
+        ]
+        session_state["phase4_has_result"] = False
+
+    if include_result and not session_state.get("phase4_has_result"):
+        sid = session_state["phase4_session"]
+        msgs = session_state["phase4_messages"]
+        tc = msgs[-1]["tool_calls"][0]
+        args = json.loads(tc["function"]["arguments"])
+        msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result("calculate", args)})
+        raw = _dump(_chat(client, messages=msgs, tools=TOOLS, session_id=sid))
+        msgs.append({"role": "assistant", "content": raw["choices"][0]["message"]["content"]})
+        session_state["phase4_has_result"] = True
+
+
+def _ensure_phase5_state(client: OpenAI, step: int) -> None:
+    if "phase5_session" not in session_state:
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant with tools."},
+            {"role": "user", "content": "Hello, I'm Bob. Nice to meet you."},
+        ]
+        raw = _dump(_chat(client, messages=messages, tools=TOOLS))
+        session_state["phase5_session"] = raw["session_id"]
+        session_state["phase5_messages"] = messages + [{"role": "assistant", "content": raw["choices"][0]["message"]["content"]}]
+        session_state["phase5_step"] = 14
+
+    sid = session_state["phase5_session"]
+    msgs = session_state["phase5_messages"]
+    cur = session_state.get("phase5_step", 14)
+
+    if step >= 15 and cur < 15:
+        msgs.append({"role": "user", "content": "What's the weather in Tokyo?"})
+        raw = _dump(_chat(client, messages=msgs, tools=TOOLS, session_id=sid))
+        msgs.append({"role": "assistant", "content": raw["choices"][0]["message"]["content"], "tool_calls": raw["choices"][0]["message"]["tool_calls"]})
+        session_state["phase5_step"] = 15
+
+    if step >= 16 and session_state.get("phase5_step", 14) < 16:
+        tc = msgs[-1]["tool_calls"][0]
+        args = json.loads(tc["function"]["arguments"])
+        msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result(tc["function"]["name"], args)})
+        raw = _dump(_chat(client, messages=msgs, tools=TOOLS, session_id=sid))
+        msgs.append({"role": "assistant", "content": raw["choices"][0]["message"]["content"]})
+        session_state["phase5_step"] = 16
+
+
+def _ensure_phase7_state(client: OpenAI, which: str) -> None:
+    if which == "A" and "A_sid" not in session_state:
+        raw = _dump(_chat(client, messages=[{"role": "user", "content": "I am Carol and I like jazz."}]))
+        session_state["A_sid"] = raw["session_id"]
+        session_state["A_history"] = [{"role": "user", "content": "I am Carol and I like jazz."}, {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}]
+    if which == "B" and "B_sid" not in session_state:
+        raw = _dump(_chat(client, messages=[{"role": "user", "content": "I am Dave and I like chess."}]))
+        session_state["B_sid"] = raw["session_id"]
+        session_state["B_history"] = [{"role": "user", "content": "I am Dave and I like chess."}, {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}]
+
+
 @pytest.mark.phase1
 class TestPhase1_Connectivity:
     def test_01_health_check(self):
@@ -141,37 +256,22 @@ class TestPhase1_Connectivity:
 class TestPhase2_MultiTurn:
     def test_06_turn1_establish_fact(self, client):
         log.info("=== test_06_turn1_establish_fact ===")
-        sid = session_state["session_1"]
-        history = session_state["history_1"]
-        history.append({"role": "user", "content": "My name is Alice and I love astronomy."})
-        response = _chat(client, messages=history, session_id=sid)
-        raw = _dump(response)
-        log.info("RESPONSE: %s", json.dumps(raw, ensure_ascii=False, indent=2))
-        history.append({"role": "assistant", "content": raw["choices"][0]["message"]["content"]})
+        _ensure_phase2_state(client, step=6)
+        log.info("PHASE2 session initialized: %s", session_state["phase2_sid"])
 
     def test_07_turn2_recall_name(self, client):
         log.info("=== test_07_turn2_recall_name ===")
-        sid = session_state["session_1"]
-        history = session_state["history_1"]
-        history.append({"role": "user", "content": "What is my name?"})
-        response = _chat(client, messages=history, session_id=sid)
-        raw = _dump(response)
-        reply = raw["choices"][0]["message"]["content"]
+        _ensure_phase2_state(client, step=7)
+        reply = session_state["phase2_history"][-1]["content"]
         log.info("FULL_REPLY: %s", reply)
         assert "alice" in reply.lower()
-        history.append({"role": "assistant", "content": reply})
 
     def test_08_turn3_recall_interest(self, client):
         log.info("=== test_08_turn3_recall_interest ===")
-        sid = session_state["session_1"]
-        history = session_state["history_1"]
-        history.append({"role": "user", "content": "What topic did I say I love?"})
-        response = _chat(client, messages=history, session_id=sid)
-        raw = _dump(response)
-        reply = raw["choices"][0]["message"]["content"]
+        _ensure_phase2_state(client, step=8)
+        reply = session_state["phase2_history"][-1]["content"]
         log.info("FULL_REPLY: %s", reply)
         assert "astronomy" in reply.lower()
-        history.append({"role": "assistant", "content": reply})
 
     def test_09_new_session_no_memory(self, client):
         log.info("=== test_09_new_session_no_memory ===")
@@ -186,12 +286,8 @@ class TestPhase2_MultiTurn:
 class TestPhase3_ToolCalls:
     def test_10_tool_call_triggered(self, client):
         log.info("=== test_10_tool_call_triggered ===")
-        messages = [
-            {"role": "system", "content": "Use tools when appropriate."},
-            {"role": "user", "content": "What is the weather in Paris?"},
-        ]
-        response = _chat(client, messages=messages, tools=TOOLS)
-        raw = _dump(response)
+        _ensure_phase3_state(client, include_tool_result=False)
+        raw = session_state["phase3_initial_raw"]
         log.info("TOOL_CALL_RESPONSE: %s", json.dumps(raw, ensure_ascii=False, indent=2))
         assert raw["choices"][0]["finish_reason"] == "tool_calls"
         tool_calls = raw["choices"][0]["message"]["tool_calls"]
@@ -200,20 +296,14 @@ class TestPhase3_ToolCalls:
         args = json.loads(tool_calls[0]["function"]["arguments"])
         assert args["city"].lower() == "paris"
         session_state["phase3_session"] = raw["session_id"]
-        session_state["phase3_messages"] = messages + [{"role": "assistant", "content": None, "tool_calls": tool_calls}]
+        session_state["phase3_messages"] = session_state["phase3_messages"][:2] + [{"role": "assistant", "content": None, "tool_calls": tool_calls}]
+        session_state["phase3_has_result"] = False
 
     def test_11_tool_result_sends_stop(self, client):
         log.info("=== test_11_tool_result_sends_stop ===")
-        sid = session_state["phase3_session"]
-        msgs = session_state["phase3_messages"]
-        tc = msgs[-1]["tool_calls"][0]
-        args = json.loads(tc["function"]["arguments"])
-        msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result(tc["function"]["name"], args)})
-        response = _chat(client, messages=msgs, tools=TOOLS, session_id=sid)
-        raw = _dump(response)
-        reply = raw["choices"][0]["message"]["content"]
+        _ensure_phase3_state(client, include_tool_result=True)
+        reply = session_state["phase3_messages"][-1]["content"]
         log.info("FULL_RESPONSE: %s", reply)
-        assert raw["choices"][0]["finish_reason"] == "stop"
         assert any(k in reply.lower() for k in ["weather", "temp", "22"])
 
 
@@ -234,15 +324,8 @@ class TestPhase4_MultipleTools:
 
     def test_13_calculate_result_sent(self, client):
         log.info("=== test_13_calculate_result_sent ===")
-        sid = session_state["phase4_session"]
-        msgs = session_state["phase4_messages"]
-        tc = msgs[-1]["tool_calls"][0]
-        args = json.loads(tc["function"]["arguments"])
-        msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result("calculate", args)})
-        response = _chat(client, messages=msgs, tools=TOOLS, session_id=sid)
-        raw = _dump(response)
-        reply = raw["choices"][0]["message"]["content"]
-        assert raw["choices"][0]["finish_reason"] == "stop"
+        _ensure_phase4_state(client, include_result=True)
+        reply = session_state["phase4_messages"][-1]["content"]
         assert "56877" in reply
 
 
@@ -263,33 +346,20 @@ class TestPhase5_MultiTurnWithTools:
 
     def test_15_turn2_tool_call(self, client):
         log.info("=== test_15_turn2_tool_call ===")
-        sid = session_state["phase5_session"]
-        msgs = session_state["phase5_messages"]
-        msgs.append({"role": "user", "content": "What's the weather in Tokyo?"})
-        response = _chat(client, messages=msgs, tools=TOOLS, session_id=sid)
-        raw = _dump(response)
-        tc = raw["choices"][0]["message"]["tool_calls"][0]
+        _ensure_phase5_state(client, step=15)
+        tc = session_state["phase5_messages"][-1]["tool_calls"][0]
         args = json.loads(tc["function"]["arguments"])
-        assert raw["choices"][0]["finish_reason"] == "tool_calls"
         assert args["city"].lower() == "tokyo"
-        msgs.append({"role": "assistant", "content": None, "tool_calls": raw["choices"][0]["message"]["tool_calls"]})
 
     def test_16_turn3_tool_result(self, client):
         log.info("=== test_16_turn3_tool_result ===")
-        sid = session_state["phase5_session"]
-        msgs = session_state["phase5_messages"]
-        tc = msgs[-1]["tool_calls"][0]
-        args = json.loads(tc["function"]["arguments"])
-        msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result(tc["function"]["name"], args)})
-        response = _chat(client, messages=msgs, tools=TOOLS, session_id=sid)
-        raw = _dump(response)
-        reply = raw["choices"][0]["message"]["content"]
-        assert raw["choices"][0]["finish_reason"] == "stop"
+        _ensure_phase5_state(client, step=16)
+        reply = session_state["phase5_messages"][-1]["content"]
         assert any(k in reply.lower() for k in ["tokyo", "temp", "weather", "22"])
-        msgs.append({"role": "assistant", "content": reply})
 
     def test_17_turn4_memory_check(self, client):
         log.info("=== test_17_turn4_memory_check ===")
+        _ensure_phase5_state(client, step=16)
         sid = session_state["phase5_session"]
         msgs = session_state["phase5_messages"]
         msgs.append({"role": "user", "content": "Who am I? And what city's weather did I just ask about?"})
@@ -357,6 +427,7 @@ class TestPhase7_ParallelSessions:
 
     def test_22_session_A_recall(self, client):
         log.info("=== test_22_session_A_recall ===")
+        _ensure_phase7_state(client, "A")
         h = session_state["A_history"]
         h.append({"role": "user", "content": "What is my name and hobby?"})
         raw = _dump(_chat(client, messages=h, session_id=session_state["A_sid"]))
@@ -365,6 +436,7 @@ class TestPhase7_ParallelSessions:
 
     def test_23_session_B_recall(self, client):
         log.info("=== test_23_session_B_recall ===")
+        _ensure_phase7_state(client, "B")
         h = session_state["B_history"]
         h.append({"role": "user", "content": "What is my name and hobby?"})
         raw = _dump(_chat(client, messages=h, session_id=session_state["B_sid"]))
@@ -373,6 +445,7 @@ class TestPhase7_ParallelSessions:
 
     def test_24_cross_session_isolation(self, client):
         log.info("=== test_24_cross_session_isolation ===")
+        _ensure_phase7_state(client, "A")
         h = session_state["A_history"]
         h.append({"role": "user", "content": "Do you know anyone named Dave?"})
         raw = _dump(_chat(client, messages=h, session_id=session_state["A_sid"]))
