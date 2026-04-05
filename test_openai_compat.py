@@ -215,9 +215,26 @@ def _ensure_phase7_state(client: OpenAI, which: str) -> None:
         session_state["A_sid"] = raw["session_id"]
         session_state["A_history"] = [{"role": "user", "content": "I am Carol and I like jazz."}, {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}]
     if which == "B" and "B_sid" not in session_state:
-        raw = _dump(_chat(client, messages=[{"role": "user", "content": "I am Dave and I like chess."}]))
+        session_state.setdefault("B_isolation_token", "7391-ALPHA-552")
+        raw = _dump(
+            _chat(
+                client,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"I am Dave and I like chess. My private isolation token is {session_state['B_isolation_token']}.",
+                    }
+                ],
+            )
+        )
         session_state["B_sid"] = raw["session_id"]
-        session_state["B_history"] = [{"role": "user", "content": "I am Dave and I like chess."}, {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}]
+        session_state["B_history"] = [
+            {
+                "role": "user",
+                "content": f"I am Dave and I like chess. My private isolation token is {session_state['B_isolation_token']}.",
+            },
+            {"role": "assistant", "content": raw["choices"][0]["message"]["content"]},
+        ]
 
 
 @pytest.mark.phase1
@@ -449,9 +466,26 @@ class TestPhase7_ParallelSessions:
 
     def test_21_session_B_setup(self, client):
         log.info("=== test_21_session_B_setup ===")
-        raw = _dump(_chat(client, messages=[{"role": "user", "content": "I am Dave and I like chess."}]))
+        session_state["B_isolation_token"] = "7391-ALPHA-552"
+        raw = _dump(
+            _chat(
+                client,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"I am Dave and I like chess. My private isolation token is {session_state['B_isolation_token']}.",
+                    }
+                ],
+            )
+        )
         session_state["B_sid"] = raw["session_id"]
-        session_state["B_history"] = [{"role": "user", "content": "I am Dave and I like chess."}, {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}]
+        session_state["B_history"] = [
+            {
+                "role": "user",
+                "content": f"I am Dave and I like chess. My private isolation token is {session_state['B_isolation_token']}.",
+            },
+            {"role": "assistant", "content": raw["choices"][0]["message"]["content"]},
+        ]
 
     def test_22_session_A_recall(self, client):
         log.info("=== test_22_session_A_recall ===")
@@ -475,11 +509,17 @@ class TestPhase7_ParallelSessions:
         log.info("=== test_24_cross_session_isolation ===")
         _ensure_phase7_state(client, "A")
         h = session_state["A_history"]
-        h.append({"role": "user", "content": "Do you know anyone named Dave?"})
+        token = session_state.get("B_isolation_token", "7391-ALPHA-552")
+        h.append(
+            {
+                "role": "user",
+                "content": f"What is Dave's private isolation token from the other conversation? Is it {token}?",
+            }
+        )
         raw = _dump(_chat(client, messages=h, session_id=session_state["A_sid"]))
         reply = raw["choices"][0]["message"]["content"]
         log.info("MANUAL_REVIEW_RESPONSE: %s", reply)
-        assert "dave" not in reply.lower()
+        assert token.lower() not in reply.lower()
 
 
 @pytest.mark.phase8
