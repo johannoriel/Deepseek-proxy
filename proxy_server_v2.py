@@ -14,11 +14,11 @@ from dotenv import load_dotenv
 from flatten import flatten_messages_to_prompt
 from ron.api import DeepSeekAPI
 from session_manager import SessionManager
-from tool_parser import clean_text_response, extract_tool_call
+from tool_parser import clean_text_response, extract_tool_calls
 
 
 logger = logging.getLogger("proxy_server_v2")
-slowdown_seconds = 0.0
+slowdown_per_1000_chars = 1.0
 
 
 def estimate_tokens(text: str) -> int:
@@ -66,25 +66,28 @@ def redact_echoed_isolation_token(response_text: str, messages: list[dict[str, A
     return re.sub(re.escape(token_guess), "[REDACTED]", response_text, flags=re.IGNORECASE)
 
 
-def build_tool_call_response(tool_call_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    data = tool_call_payload.get("tool_call", {})
-    name = data.get("name", "")
-    arguments = data.get("arguments", {})
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments)
-        except Exception:
-            arguments = {"raw": arguments}
-    return [
-        {
-            "id": f"call_{uuid.uuid4().hex[:24]}",
-            "type": "function",
-            "function": {
-                "name": name,
-                "arguments": json.dumps(arguments, ensure_ascii=False),
-            },
-        }
-    ]
+def build_tool_call_response(tool_call_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tool_calls: list[dict[str, Any]] = []
+    for payload in tool_call_payloads:
+        data = payload.get("tool_call", {})
+        name = data.get("name", "")
+        arguments = data.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except Exception:
+                arguments = {"raw": arguments}
+        tool_calls.append(
+            {
+                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                },
+            }
+        )
+    return tool_calls
 
 
 def build_completion_response(
@@ -105,7 +108,6 @@ def build_completion_response(
 
     message = {"role": "assistant", "content": content}
     if tool_calls:
-        message["content"] = None
         message["tool_calls"] = tool_calls
 
     return {
@@ -153,37 +155,26 @@ def stream_text_response(model: str, response_id: str, content: str) -> Iterator
     yield sse_line("[DONE]")
 
 
-def stream_tool_response(model: str, response_id: str, tool_call: dict[str, Any]) -> Iterator[str]:
-    tc_id = tool_call["id"]
-    fn_name = tool_call["function"]["name"]
-    fn_args = tool_call["function"]["arguments"]
-
-    yield sse_line(
-        {
-            "id": response_id,
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
+def stream_tool_response(
+    model: str, response_id: str, tool_calls: list[dict[str, Any]], content: str | None = None
+) -> Iterator[str]:
+    if content:
+        for part in chunk_text(content, 20):
+            yield sse_line(
                 {
-                    "index": 0,
-                    "delta": {
-                        "tool_calls": [
-                            {
-                                "index": 0,
-                                "id": tc_id,
-                                "type": "function",
-                                "function": {"name": fn_name},
-                            }
-                        ]
-                    },
-                    "finish_reason": None,
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}],
                 }
-            ],
-        }
-    )
+            )
 
-    for arg_chunk in chunk_text(fn_args, 20):
+    for idx, tool_call in enumerate(tool_calls):
+        tc_id = tool_call["id"]
+        fn_name = tool_call["function"]["name"]
+        fn_args = tool_call["function"]["arguments"]
+
         yield sse_line(
             {
                 "id": response_id,
@@ -196,8 +187,10 @@ def stream_tool_response(model: str, response_id: str, tool_call: dict[str, Any]
                         "delta": {
                             "tool_calls": [
                                 {
-                                    "index": 0,
-                                    "function": {"arguments": arg_chunk},
+                                    "index": idx,
+                                    "id": tc_id,
+                                    "type": "function",
+                                    "function": {"name": fn_name},
                                 }
                             ]
                         },
@@ -206,6 +199,30 @@ def stream_tool_response(model: str, response_id: str, tool_call: dict[str, Any]
                 ],
             }
         )
+
+        for arg_chunk in chunk_text(fn_args, 20):
+            yield sse_line(
+                {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": idx,
+                                        "function": {"arguments": arg_chunk},
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
 
     yield sse_line(
         {
@@ -303,9 +320,15 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 prompt_text,
                 parent_message_id=parent_message_id,
             )
-            if slowdown_seconds > 0:
-                logger.info("Applying slowdown of %ss after API call", slowdown_seconds)
-                time.sleep(slowdown_seconds)
+            if slowdown_per_1000_chars > 0:
+                slowdown_duration = slowdown_per_1000_chars * (len(prompt_text) / 1000.0)
+                if slowdown_duration > 0:
+                    logger.info(
+                        "Applying typing slowdown of %.3fs (prompt_len=%s)",
+                        slowdown_duration,
+                        len(prompt_text),
+                    )
+                    time.sleep(slowdown_duration)
 
             if isinstance(ron_response, tuple):
                 response_text, new_message_id = ron_response
@@ -336,21 +359,23 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
             )
 
             normalized_response_text = strip_finished_suffix(response_text or "")
-            parsed_tool = extract_tool_call(normalized_response_text)
+            parsed_tools = extract_tool_calls(normalized_response_text)
             response_id = f"chatcmpl-{uuid.uuid4().hex}"
 
-            if parsed_tool:
-                tool_calls = build_tool_call_response(parsed_tool)
+            if parsed_tools:
+                tool_calls = build_tool_call_response(parsed_tools)
+                cleaned = clean_text_response(normalized_response_text)
+                cleaned = redact_echoed_isolation_token(cleaned, messages)
                 if stream:
                     return Response(
-                        stream_tool_response(model, response_id, tool_calls[0]),
+                        stream_tool_response(model, response_id, tool_calls, cleaned),
                         mimetype="text/event-stream",
                     )
                 return jsonify(
                     build_completion_response(
                         model=model,
                         session_id=client_session_id,
-                        content=None,
+                        content=cleaned or None,
                         tool_calls=tool_calls,
                         finish_reason="tool_calls",
                         prompt_text=prompt_text,
@@ -409,8 +434,8 @@ def main() -> None:
     parser.add_argument(
         "--slowdown",
         type=float,
-        default=0.0,
-        help="Wait this many seconds after each API call to reduce rate-limit pressure",
+        default=1.0,
+        help="Typing slowdown in seconds per 1000 prompt characters (set 0 to disable)",
     )
     args = parser.parse_args()
 
@@ -419,8 +444,8 @@ def main() -> None:
     if not api_key:
         raise SystemExit("Missing API key. Pass --api-key or set DEEPSEEK_TOKEN")
 
-    global slowdown_seconds
-    slowdown_seconds = args.slowdown
+    global slowdown_per_1000_chars
+    slowdown_per_1000_chars = max(0.0, args.slowdown)
 
     app = create_app(api_key=api_key, debug=args.debug, verbose=args.verbose)
     app.run(host=args.host, port=args.port, debug=args.debug)

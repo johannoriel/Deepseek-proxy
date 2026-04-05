@@ -73,7 +73,7 @@ def _format_available_tools(tools: list[dict[str, Any]]) -> str:
         )
 
     sections.append(
-        'To call a tool, respond with only a JSON object: {"tool_call": {"name": "...", "arguments": {...}}} — nothing else.'
+        'To call tools, respond with JSON: {"tool_call": {"name": "...", "arguments": {...}}} or {"tool_calls": [{"name": "...", "arguments": {...}}]}.'
     )
     return "\n".join(sections)
 
