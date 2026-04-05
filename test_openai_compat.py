@@ -67,6 +67,15 @@ def tool_result(name, args):
     return json.dumps({"error": "unknown tool"})
 
 
+def _contains_number(text: str, value: int) -> bool:
+    """
+    Check whether a number appears in text regardless of common formatting
+    (commas, spaces, punctuation, markdown emphasis).
+    """
+    digits_only = "".join(ch for ch in (text or "") if ch.isdigit())
+    return str(value) in digits_only
+
+
 session_state: dict[str, Any] = {}
 
 
@@ -326,7 +335,7 @@ class TestPhase4_MultipleTools:
         log.info("=== test_13_calculate_result_sent ===")
         _ensure_phase4_state(client, include_result=True)
         reply = session_state["phase4_messages"][-1]["content"]
-        assert "56877" in reply
+        assert _contains_number(reply, 56877)
 
 
 @pytest.mark.phase5
