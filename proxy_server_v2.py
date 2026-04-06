@@ -14,11 +14,11 @@ from dotenv import load_dotenv
 from flatten import flatten_messages_to_prompt
 from ron.api import DeepSeekAPI
 from session_manager import SessionManager
-from tool_parser import clean_text_response, extract_tool_call
+from tool_parser import clean_text_response, extract_tool_calls
 
 
 logger = logging.getLogger("proxy_server_v2")
-slowdown_seconds = 0.0
+slowdown_per_1000_chars = 1.0
 
 
 def estimate_tokens(text: str) -> int:
@@ -38,7 +38,9 @@ ISOLATION_TOKEN_GUESS_RE = re.compile(
 )
 
 
-def redact_echoed_isolation_token(response_text: str, messages: list[dict[str, Any]]) -> str:
+def redact_echoed_isolation_token(
+    response_text: str, messages: list[dict[str, Any]]
+) -> str:
     """Avoid echoing token guesses when users ask about another session's private token."""
     if not response_text or not messages:
         return response_text
@@ -47,7 +49,9 @@ def redact_echoed_isolation_token(response_text: str, messages: list[dict[str, A
         (
             msg
             for msg in reversed(messages)
-            if isinstance(msg, dict) and msg.get("role") == "user" and isinstance(msg.get("content"), str)
+            if isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and isinstance(msg.get("content"), str)
         ),
         None,
     )
@@ -63,28 +67,35 @@ def redact_echoed_isolation_token(response_text: str, messages: list[dict[str, A
         return response_text
 
     token_guess = match.group(1)
-    return re.sub(re.escape(token_guess), "[REDACTED]", response_text, flags=re.IGNORECASE)
+    return re.sub(
+        re.escape(token_guess), "[REDACTED]", response_text, flags=re.IGNORECASE
+    )
 
 
-def build_tool_call_response(tool_call_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    data = tool_call_payload.get("tool_call", {})
-    name = data.get("name", "")
-    arguments = data.get("arguments", {})
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments)
-        except Exception:
-            arguments = {"raw": arguments}
-    return [
-        {
-            "id": f"call_{uuid.uuid4().hex[:24]}",
-            "type": "function",
-            "function": {
-                "name": name,
-                "arguments": json.dumps(arguments, ensure_ascii=False),
-            },
-        }
-    ]
+def build_tool_call_response(
+    tool_call_payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    tool_calls: list[dict[str, Any]] = []
+    for payload in tool_call_payloads:
+        data = payload.get("tool_call", {})
+        name = data.get("name", "")
+        arguments = data.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except Exception:
+                arguments = {"raw": arguments}
+        tool_calls.append(
+            {
+                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                },
+            }
+        )
+    return tool_calls
 
 
 def build_completion_response(
@@ -105,7 +116,6 @@ def build_completion_response(
 
     message = {"role": "assistant", "content": content}
     if tool_calls:
-        message["content"] = None
         message["tool_calls"] = tool_calls
 
     return {
@@ -137,7 +147,9 @@ def stream_text_response(model: str, response_id: str, content: str) -> Iterator
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": model,
-                "choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}],
+                "choices": [
+                    {"index": 0, "delta": {"content": part}, "finish_reason": None}
+                ],
             }
         )
 
@@ -153,37 +165,31 @@ def stream_text_response(model: str, response_id: str, content: str) -> Iterator
     yield sse_line("[DONE]")
 
 
-def stream_tool_response(model: str, response_id: str, tool_call: dict[str, Any]) -> Iterator[str]:
-    tc_id = tool_call["id"]
-    fn_name = tool_call["function"]["name"]
-    fn_args = tool_call["function"]["arguments"]
-
-    yield sse_line(
-        {
-            "id": response_id,
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
+def stream_tool_response(
+    model: str,
+    response_id: str,
+    tool_calls: list[dict[str, Any]],
+    content: str | None = None,
+) -> Iterator[str]:
+    if content:
+        for part in chunk_text(content, 20):
+            yield sse_line(
                 {
-                    "index": 0,
-                    "delta": {
-                        "tool_calls": [
-                            {
-                                "index": 0,
-                                "id": tc_id,
-                                "type": "function",
-                                "function": {"name": fn_name},
-                            }
-                        ]
-                    },
-                    "finish_reason": None,
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {"index": 0, "delta": {"content": part}, "finish_reason": None}
+                    ],
                 }
-            ],
-        }
-    )
+            )
 
-    for arg_chunk in chunk_text(fn_args, 20):
+    for idx, tool_call in enumerate(tool_calls):
+        tc_id = tool_call["id"]
+        fn_name = tool_call["function"]["name"]
+        fn_args = tool_call["function"]["arguments"]
+
         yield sse_line(
             {
                 "id": response_id,
@@ -196,8 +202,10 @@ def stream_tool_response(model: str, response_id: str, tool_call: dict[str, Any]
                         "delta": {
                             "tool_calls": [
                                 {
-                                    "index": 0,
-                                    "function": {"arguments": arg_chunk},
+                                    "index": idx,
+                                    "id": tc_id,
+                                    "type": "function",
+                                    "function": {"name": fn_name},
                                 }
                             ]
                         },
@@ -206,6 +214,30 @@ def stream_tool_response(model: str, response_id: str, tool_call: dict[str, Any]
                 ],
             }
         )
+
+        for arg_chunk in chunk_text(fn_args, 20):
+            yield sse_line(
+                {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": idx,
+                                        "function": {"arguments": arg_chunk},
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
 
     yield sse_line(
         {
@@ -223,8 +255,12 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
     app = Flask(__name__)
     CORS(app)
 
-    log_level = logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
-    logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    log_level = (
+        logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
+    )
+    logging.basicConfig(
+        level=log_level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
 
     ron_api = DeepSeekAPI(api_key)
     session_manager = SessionManager(create_backend_session=ron_api.create_chat_session)
@@ -255,7 +291,9 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
         try:
             payload = request.get_json(force=True, silent=False) or {}
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Incoming payload: %s", json.dumps(payload, ensure_ascii=False))
+                logger.debug(
+                    "Incoming payload: %s", json.dumps(payload, ensure_ascii=False)
+                )
             messages = payload.get("messages", [])
             tools = payload.get("tools")
             stream = bool(payload.get("stream", False))
@@ -263,15 +301,29 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
             client_session_id = payload.get("session_id")
 
             if not isinstance(messages, list) or not messages:
-                return jsonify({"error": {"message": "messages must be a non-empty list", "type": "invalid_request_error", "code": 400}}), 400
+                return jsonify(
+                    {
+                        "error": {
+                            "message": "messages must be a non-empty list",
+                            "type": "invalid_request_error",
+                            "code": 400,
+                        }
+                    }
+                ), 400
 
-            backend_session_id, parent_message_id = session_manager.get_or_create(
-                client_session_id, len(messages)
+            resolved_id, backend_session_id, parent_message_id, last_message_count = (
+                session_manager.get_or_create(
+                    client_session_id, len(messages), messages
+                )
             )
             if not client_session_id:
-                client_session_id = session_manager.new_client_session_id()
+                client_session_id = (
+                    resolved_id or session_manager.new_client_session_id()
+                )
 
-            previous_tools_signature = session_manager.get_last_tools_signature(client_session_id)
+            previous_tools_signature = session_manager.get_last_tools_signature(
+                client_session_id
+            )
             current_tools_signature = (
                 json.dumps(tools, ensure_ascii=False, sort_keys=True) if tools else None
             )
@@ -284,9 +336,27 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 # Avoid repeating the exact same tool catalog on every follow-up turn.
                 effective_tools = None
 
-            # Keep backend history stable: after a session exists, send only the incremental turn
-            # instead of re-flattening full OpenAI history every request.
-            prompt_messages = messages if parent_message_id is None else [messages[-1]]
+            # Keep backend history stable: after a session exists, send only unseen incremental turns.
+            if parent_message_id is None:
+                prompt_messages = messages
+            elif 0 <= last_message_count < len(messages):
+                prompt_messages = messages[last_message_count:]
+            else:
+                prompt_messages = [messages[-1]]
+
+            if parent_message_id is not None and prompt_messages:
+                # Do not resend echoed assistant tool-call handoff messages.
+                # The backend already has that assistant turn via parent_message_id,
+                # so replaying it here duplicates tool_call JSON at the start of the next turn.
+                while (
+                    prompt_messages
+                    and isinstance(prompt_messages[0], dict)
+                    and prompt_messages[0].get("role") == "assistant"
+                    and prompt_messages[0].get("tool_calls")
+                ):
+                    prompt_messages = prompt_messages[1:]
+                if not prompt_messages:
+                    prompt_messages = [messages[-1]]
             prompt_text = flatten_messages_to_prompt(prompt_messages, effective_tools)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Flattened prompt text:\n%s", prompt_text)
@@ -303,9 +373,17 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 prompt_text,
                 parent_message_id=parent_message_id,
             )
-            if slowdown_seconds > 0:
-                logger.info("Applying slowdown of %ss after API call", slowdown_seconds)
-                time.sleep(slowdown_seconds)
+            if slowdown_per_1000_chars > 0:
+                slowdown_duration = slowdown_per_1000_chars * (
+                    len(prompt_text) / 1000.0
+                )
+                if slowdown_duration > 0:
+                    logger.info(
+                        "Applying typing slowdown of %.3fs (prompt_len=%s)",
+                        slowdown_duration,
+                        len(prompt_text),
+                    )
+                    time.sleep(slowdown_duration)
 
             if isinstance(ron_response, tuple):
                 response_text, new_message_id = ron_response
@@ -333,24 +411,37 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 backend_session_id,
                 new_message_id,
                 last_tools_signature=current_tools_signature,
+                last_message_count=len(messages),
+                messages=messages,
             )
 
             normalized_response_text = strip_finished_suffix(response_text or "")
-            parsed_tool = extract_tool_call(normalized_response_text)
+            parsed_tools = extract_tool_calls(normalized_response_text)
             response_id = f"chatcmpl-{uuid.uuid4().hex}"
 
-            if parsed_tool:
-                tool_calls = build_tool_call_response(parsed_tool)
+            if parsed_tools:
+                tool_calls = build_tool_call_response(parsed_tools)
+                cleaned = clean_text_response(normalized_response_text)
+                cleaned = redact_echoed_isolation_token(cleaned, messages)
+                cleaned_candidate = (cleaned or "").strip()
+                if cleaned_candidate and extract_tool_calls(cleaned_candidate):
+                    # If residual content is still a tool-call payload, suppress it to avoid duplicate serialization.
+                    cleaned = ""
+                cleaned_for_message = (
+                    cleaned.strip() if isinstance(cleaned, str) else ""
+                )
+                if not cleaned_for_message:
+                    cleaned = None
                 if stream:
                     return Response(
-                        stream_tool_response(model, response_id, tool_calls[0]),
+                        stream_tool_response(model, response_id, tool_calls, cleaned),
                         mimetype="text/event-stream",
                     )
                 return jsonify(
                     build_completion_response(
                         model=model,
                         session_id=client_session_id,
-                        content=None,
+                        content=cleaned,
                         tool_calls=tool_calls,
                         finish_reason="tool_calls",
                         prompt_text=prompt_text,
@@ -381,7 +472,10 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
             status_code = 500
             if getattr(exc, "status_code", None) == 429:
                 status_code = 429
-            elif "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower():
+            elif (
+                "rate limit" in str(exc).lower()
+                or "too many requests" in str(exc).lower()
+            ):
                 status_code = 429
             return (
                 jsonify(
@@ -400,17 +494,21 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="OpenAI compatibility proxy for ron API")
+    parser = argparse.ArgumentParser(
+        description="OpenAI compatibility proxy for ron API"
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5005)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--verbose", action="store_true", help="Enable informational runtime logs")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Enable informational runtime logs"
+    )
     parser.add_argument(
         "--slowdown",
         type=float,
-        default=0.0,
-        help="Wait this many seconds after each API call to reduce rate-limit pressure",
+        default=1.0,
+        help="Typing slowdown in seconds per 1000 prompt characters (set 0 to disable)",
     )
     args = parser.parse_args()
 
@@ -419,8 +517,8 @@ def main() -> None:
     if not api_key:
         raise SystemExit("Missing API key. Pass --api-key or set DEEPSEEK_TOKEN")
 
-    global slowdown_seconds
-    slowdown_seconds = args.slowdown
+    global slowdown_per_1000_chars
+    slowdown_per_1000_chars = max(0.0, args.slowdown)
 
     app = create_app(api_key=api_key, debug=args.debug, verbose=args.verbose)
     app.run(host=args.host, port=args.port, debug=args.debug)

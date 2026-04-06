@@ -27,7 +27,7 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
-    for i in range(1, 9):
+    for i in range(1, 10):
         config.addinivalue_line("markers", f"phase{i}: test phase {i}")
     config._pass_log_path = Path(config.getoption("--pass-log"))
     config._passed_registry = set()

@@ -11,7 +11,12 @@ def collapse_consecutive_roles(messages: list[dict[str, Any]]) -> list[dict[str,
     collapsed: list[dict[str, Any]] = []
     for msg in messages:
         current = deepcopy(msg)
-        if collapsed and collapsed[-1].get("role") == current.get("role"):
+        should_merge = bool(collapsed and collapsed[-1].get("role") == current.get("role"))
+        if should_merge and current.get("role") == "tool":
+            # Never merge tool responses: each tool_call_id must remain distinct.
+            should_merge = False
+
+        if should_merge:
             prev = collapsed[-1]
             prev_content = prev.get("content") or ""
             new_content = current.get("content") or ""
@@ -34,7 +39,7 @@ def _normalize_content(content: Any) -> str:
 
 
 def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
-    lines = []
+    items: list[dict[str, Any]] = []
     for tc in tool_calls:
         function = tc.get("function", {}) if isinstance(tc, dict) else {}
         name = function.get("name", "")
@@ -44,16 +49,8 @@ def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
                 arguments = json.loads(arguments)
             except Exception:
                 pass
-        lines.append(
-            json.dumps(
-                {
-                    "name": name,
-                    "arguments": arguments,
-                },
-                ensure_ascii=False,
-            )
-        )
-    return "\n".join(lines)
+        items.append({"name": name, "arguments": arguments})
+    return json.dumps({"tool_calls": items}, ensure_ascii=False)
 
 
 def _format_available_tools(tools: list[dict[str, Any]]) -> str:
@@ -73,7 +70,7 @@ def _format_available_tools(tools: list[dict[str, Any]]) -> str:
         )
 
     sections.append(
-        'To call a tool, respond with only a JSON object: {"tool_call": {"name": "...", "arguments": {...}}} — nothing else.'
+        'To call tools, respond with JSON: {"tool_call": {"name": "...", "arguments": {...}}} or {"tool_calls": [{"name": "...", "arguments": {...}}]}.'
     )
     return "\n".join(sections)
 
@@ -100,11 +97,13 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
             # Keep user turns clean for backend-visible transcript readability.
             sections.append(content.rstrip())
         elif role == "assistant":
-            block = [f"[ASSISTANT]\n{content}".rstrip()]
             if msg.get("tool_calls"):
-                block.append("[TOOL_CALLS]")
-                block.append(_format_tool_calls(msg["tool_calls"]))
-            sections.append("\n".join(part for part in block if part).rstrip())
+                # Always serialize assistant tool-calls as a single compact JSON object.
+                # Do not duplicate optional assistant `content` here, because clients sometimes
+                # echo the same tool JSON in `content`, which would leak/duplicate instructions.
+                sections.append(_format_tool_calls(msg["tool_calls"]))
+                continue
+            sections.append(f"[ASSISTANT]\n{content}".rstrip())
         elif role == "tool":
             tc_id = msg.get("tool_call_id", "")
             sections.append(f"[TOOL_RESULT id={tc_id}]\n{content}".rstrip())
