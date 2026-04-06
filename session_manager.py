@@ -22,8 +22,8 @@ def _message_signature(msg: dict[str, Any]) -> str:
 
 
 def _messages_prefix_of(shorter: list[str], longer: list[str]) -> bool:
-    """Check if `shorter` is a prefix of `longer` using message signatures."""
-    if len(shorter) > len(longer):
+    """Check if `shorter` is a strict prefix of `longer`."""
+    if len(shorter) >= len(longer):
         return False
     return all(s == l for s, l in zip(shorter, longer))
 
