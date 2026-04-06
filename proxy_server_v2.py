@@ -308,6 +308,20 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 prompt_messages = messages[last_message_count:]
             else:
                 prompt_messages = [messages[-1]]
+
+            if parent_message_id is not None and prompt_messages:
+                # Do not resend echoed assistant tool-call handoff messages.
+                # The backend already has that assistant turn via parent_message_id,
+                # so replaying it here duplicates tool_call JSON at the start of the next turn.
+                while (
+                    prompt_messages
+                    and isinstance(prompt_messages[0], dict)
+                    and prompt_messages[0].get("role") == "assistant"
+                    and prompt_messages[0].get("tool_calls")
+                ):
+                    prompt_messages = prompt_messages[1:]
+                if not prompt_messages:
+                    prompt_messages = [messages[-1]]
             prompt_text = flatten_messages_to_prompt(prompt_messages, effective_tools)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Flattened prompt text:\n%s", prompt_text)
