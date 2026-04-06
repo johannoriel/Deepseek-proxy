@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from flatten import flatten_messages_to_prompt
 from ron.api import DeepSeekAPI
 from session_manager import SessionManager
+from token_pool import TokenPool
 from tool_parser import clean_text_response, extract_tool_calls
 
 
@@ -251,7 +252,27 @@ def stream_tool_response(
     yield sse_line("[DONE]")
 
 
-def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flask:
+def load_token_pool() -> TokenPool | None:
+    """Scan environment for DEEPSEEK_TOKEN1, DEEPSEEK_TOKEN2, ... and return a pool."""
+    tokens: list[str] = []
+    i = 1
+    while True:
+        token = os.getenv(f"DEEPSEEK_TOKEN{i}")
+        if not token:
+            break
+        tokens.append(token)
+        i += 1
+    if not tokens:
+        return None
+    return TokenPool(tokens)
+
+
+def create_app(
+    api_key: str,
+    debug: bool = False,
+    verbose: bool = False,
+    token_pool: TokenPool | None = None,
+) -> Flask:
     app = Flask(__name__)
     CORS(app)
 
@@ -263,7 +284,20 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
     )
 
     ron_api = DeepSeekAPI(api_key)
-    session_manager = SessionManager(create_backend_session=ron_api.create_chat_session)
+    if token_pool is not None:
+        create_session = token_pool.create_session_fn()
+        logger.info("Token pool mode active with %d token(s)", token_pool.size)
+    else:
+        create_session = ron_api.create_chat_session
+    session_manager = SessionManager(create_backend_session=create_session)
+
+    def _resolve_api(backend_session_id: str | None) -> DeepSeekAPI:
+        """Return the correct API instance for a backend session (pool-aware)."""
+        if token_pool is not None and backend_session_id:
+            api = token_pool.get_api_for_session(backend_session_id)
+            if api is not None:
+                return api
+        return ron_api
 
     @app.get("/health")
     def health() -> Any:
@@ -368,7 +402,7 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 len(prompt_messages),
                 len(messages),
             )
-            ron_response = ron_api.chat_completion(
+            ron_response = _resolve_api(backend_session_id).chat_completion(
                 backend_session_id,
                 prompt_text,
                 parent_message_id=parent_message_id,
@@ -510,17 +544,34 @@ def main() -> None:
         default=1.0,
         help="Typing slowdown in seconds per 1000 prompt characters (set 0 to disable)",
     )
+    parser.add_argument(
+        "--pool",
+        action="store_true",
+        help="Enable token pool mode using DEEPSEEK_TOKEN1, DEEPSEEK_TOKEN2, etc. from .env",
+    )
     args = parser.parse_args()
 
     load_dotenv()
-    api_key = args.api_key or os.getenv("DEEPSEEK_TOKEN")
-    if not api_key:
-        raise SystemExit("Missing API key. Pass --api-key or set DEEPSEEK_TOKEN")
+
+    token_pool = None
+    if args.pool:
+        token_pool = load_token_pool()
+        if token_pool is None:
+            raise SystemExit(
+                "Missing token pool. Set DEEPSEEK_TOKEN1, DEEPSEEK_TOKEN2, etc. in .env"
+            )
+        api_key = os.getenv("DEEPSEEK_TOKEN1") or ""
+    else:
+        api_key = args.api_key or os.getenv("DEEPSEEK_TOKEN")
+        if not api_key:
+            raise SystemExit("Missing API key. Pass --api-key or set DEEPSEEK_TOKEN")
 
     global slowdown_per_1000_chars
     slowdown_per_1000_chars = max(0.0, args.slowdown)
 
-    app = create_app(api_key=api_key, debug=args.debug, verbose=args.verbose)
+    app = create_app(
+        api_key=api_key, debug=args.debug, verbose=args.verbose, token_pool=token_pool
+    )
     app.run(host=args.host, port=args.port, debug=args.debug)
 
 
