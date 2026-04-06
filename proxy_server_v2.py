@@ -38,7 +38,9 @@ ISOLATION_TOKEN_GUESS_RE = re.compile(
 )
 
 
-def redact_echoed_isolation_token(response_text: str, messages: list[dict[str, Any]]) -> str:
+def redact_echoed_isolation_token(
+    response_text: str, messages: list[dict[str, Any]]
+) -> str:
     """Avoid echoing token guesses when users ask about another session's private token."""
     if not response_text or not messages:
         return response_text
@@ -47,7 +49,9 @@ def redact_echoed_isolation_token(response_text: str, messages: list[dict[str, A
         (
             msg
             for msg in reversed(messages)
-            if isinstance(msg, dict) and msg.get("role") == "user" and isinstance(msg.get("content"), str)
+            if isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and isinstance(msg.get("content"), str)
         ),
         None,
     )
@@ -63,10 +67,14 @@ def redact_echoed_isolation_token(response_text: str, messages: list[dict[str, A
         return response_text
 
     token_guess = match.group(1)
-    return re.sub(re.escape(token_guess), "[REDACTED]", response_text, flags=re.IGNORECASE)
+    return re.sub(
+        re.escape(token_guess), "[REDACTED]", response_text, flags=re.IGNORECASE
+    )
 
 
-def build_tool_call_response(tool_call_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_tool_call_response(
+    tool_call_payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     tool_calls: list[dict[str, Any]] = []
     for payload in tool_call_payloads:
         data = payload.get("tool_call", {})
@@ -139,7 +147,9 @@ def stream_text_response(model: str, response_id: str, content: str) -> Iterator
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": model,
-                "choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}],
+                "choices": [
+                    {"index": 0, "delta": {"content": part}, "finish_reason": None}
+                ],
             }
         )
 
@@ -156,7 +166,10 @@ def stream_text_response(model: str, response_id: str, content: str) -> Iterator
 
 
 def stream_tool_response(
-    model: str, response_id: str, tool_calls: list[dict[str, Any]], content: str | None = None
+    model: str,
+    response_id: str,
+    tool_calls: list[dict[str, Any]],
+    content: str | None = None,
 ) -> Iterator[str]:
     if content:
         for part in chunk_text(content, 20):
@@ -166,7 +179,9 @@ def stream_tool_response(
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
                     "model": model,
-                    "choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}],
+                    "choices": [
+                        {"index": 0, "delta": {"content": part}, "finish_reason": None}
+                    ],
                 }
             )
 
@@ -240,8 +255,12 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
     app = Flask(__name__)
     CORS(app)
 
-    log_level = logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
-    logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    log_level = (
+        logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
+    )
+    logging.basicConfig(
+        level=log_level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
 
     ron_api = DeepSeekAPI(api_key)
     session_manager = SessionManager(create_backend_session=ron_api.create_chat_session)
@@ -272,7 +291,9 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
         try:
             payload = request.get_json(force=True, silent=False) or {}
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Incoming payload: %s", json.dumps(payload, ensure_ascii=False))
+                logger.debug(
+                    "Incoming payload: %s", json.dumps(payload, ensure_ascii=False)
+                )
             messages = payload.get("messages", [])
             tools = payload.get("tools")
             stream = bool(payload.get("stream", False))
@@ -280,15 +301,29 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
             client_session_id = payload.get("session_id")
 
             if not isinstance(messages, list) or not messages:
-                return jsonify({"error": {"message": "messages must be a non-empty list", "type": "invalid_request_error", "code": 400}}), 400
+                return jsonify(
+                    {
+                        "error": {
+                            "message": "messages must be a non-empty list",
+                            "type": "invalid_request_error",
+                            "code": 400,
+                        }
+                    }
+                ), 400
 
-            backend_session_id, parent_message_id, last_message_count = session_manager.get_or_create(
-                client_session_id, len(messages)
+            resolved_id, backend_session_id, parent_message_id, last_message_count = (
+                session_manager.get_or_create(
+                    client_session_id, len(messages), messages
+                )
             )
             if not client_session_id:
-                client_session_id = session_manager.new_client_session_id()
+                client_session_id = (
+                    resolved_id or session_manager.new_client_session_id()
+                )
 
-            previous_tools_signature = session_manager.get_last_tools_signature(client_session_id)
+            previous_tools_signature = session_manager.get_last_tools_signature(
+                client_session_id
+            )
             current_tools_signature = (
                 json.dumps(tools, ensure_ascii=False, sort_keys=True) if tools else None
             )
@@ -339,7 +374,9 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 parent_message_id=parent_message_id,
             )
             if slowdown_per_1000_chars > 0:
-                slowdown_duration = slowdown_per_1000_chars * (len(prompt_text) / 1000.0)
+                slowdown_duration = slowdown_per_1000_chars * (
+                    len(prompt_text) / 1000.0
+                )
                 if slowdown_duration > 0:
                     logger.info(
                         "Applying typing slowdown of %.3fs (prompt_len=%s)",
@@ -375,6 +412,7 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 new_message_id,
                 last_tools_signature=current_tools_signature,
                 last_message_count=len(messages),
+                messages=messages,
             )
 
             normalized_response_text = strip_finished_suffix(response_text or "")
@@ -389,7 +427,9 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
                 if cleaned_candidate and extract_tool_calls(cleaned_candidate):
                     # If residual content is still a tool-call payload, suppress it to avoid duplicate serialization.
                     cleaned = ""
-                cleaned_for_message = cleaned.strip() if isinstance(cleaned, str) else ""
+                cleaned_for_message = (
+                    cleaned.strip() if isinstance(cleaned, str) else ""
+                )
                 if not cleaned_for_message:
                     cleaned = None
                 if stream:
@@ -432,7 +472,10 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
             status_code = 500
             if getattr(exc, "status_code", None) == 429:
                 status_code = 429
-            elif "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower():
+            elif (
+                "rate limit" in str(exc).lower()
+                or "too many requests" in str(exc).lower()
+            ):
                 status_code = 429
             return (
                 jsonify(
@@ -451,12 +494,16 @@ def create_app(api_key: str, debug: bool = False, verbose: bool = False) -> Flas
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="OpenAI compatibility proxy for ron API")
+    parser = argparse.ArgumentParser(
+        description="OpenAI compatibility proxy for ron API"
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5005)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--verbose", action="store_true", help="Enable informational runtime logs")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Enable informational runtime logs"
+    )
     parser.add_argument(
         "--slowdown",
         type=float,
