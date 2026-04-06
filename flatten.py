@@ -97,17 +97,13 @@ def flatten_messages_to_prompt(messages: list[dict], tools: list[dict] | None = 
             # Keep user turns clean for backend-visible transcript readability.
             sections.append(content.rstrip())
         elif role == "assistant":
-            body_parts: list[str] = []
-            if content:
-                body_parts.append(content.rstrip())
             if msg.get("tool_calls"):
-                body_parts.append(_format_tool_calls(msg["tool_calls"]))
-                if not content:
-                    # For assistant tool-call handoff messages, keep raw JSON only (no assistant tag)
-                    # so downstream text backends don't reinterpret this as a fresh user-style instruction.
-                    sections.append(body_parts[-1])
-                    continue
-            sections.append(f"[ASSISTANT]\n" + "\n".join(body_parts).rstrip())
+                # Always serialize assistant tool-calls as a single compact JSON object.
+                # Do not duplicate optional assistant `content` here, because clients sometimes
+                # echo the same tool JSON in `content`, which would leak/duplicate instructions.
+                sections.append(_format_tool_calls(msg["tool_calls"]))
+                continue
+            sections.append(f"[ASSISTANT]\n{content}".rstrip())
         elif role == "tool":
             tc_id = msg.get("tool_call_id", "")
             sections.append(f"[TOOL_RESULT id={tc_id}]\n{content}".rstrip())
