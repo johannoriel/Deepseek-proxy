@@ -87,6 +87,16 @@ class TokenPool:
 
             with self._lock:
                 self._session_apis[session_id] = api
+
+            # Masked token prefix for identification (e.g. "sk-abc***" or "eyJhb***")
+            raw_token = api.auth_token
+            prefix = raw_token[:5] if raw_token else "?"
+            logger.info(
+                "[token_pool] session=%s token_index=%d token=%s***",
+                session_id,
+                idx,
+                prefix,
+            )
             return session_id
 
         raise RuntimeError(
